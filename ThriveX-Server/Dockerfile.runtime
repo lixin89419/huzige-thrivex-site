@@ -1,4 +1,4 @@
-FROM eclipse-temurin:11-jre-jammy
+FROM eclipse-temurin:11-jre-alpine
 
 ENV PORT=9003
 ENV DB_PORT=3306
