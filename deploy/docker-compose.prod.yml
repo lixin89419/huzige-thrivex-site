@@ -33,7 +33,7 @@ services:
       retries: 20
 
   server:
-    image: ccr.ccs.tencentyun.com/huzige/huzige-thrivex-server:latest
+    image: ghcr.io/lixin89419/huzige-thrivex-server:latest
     restart: unless-stopped
     depends_on:
       mysql:

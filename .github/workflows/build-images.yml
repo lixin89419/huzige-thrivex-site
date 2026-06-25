@@ -28,10 +28,6 @@ jobs:
             context: ThriveX-Admin
             file: ThriveX-Admin/dockerfile
             image: huzige-thrivex-admin
-          - name: server
-            context: .
-            file: ThriveX-Server/Dockerfile.runtime
-            image: huzige-thrivex-server
 
     steps:
       - name: Checkout
