@@ -15,7 +15,7 @@ ENV TZ=Asia/Shanghai
 WORKDIR /server
 
 COPY deploy/artifacts/blog.jar /server/app.jar
-COPY RUN.runtime.sh /server/RUN.runtime.sh
+COPY ThriveX-Server/RUN.runtime.sh /server/RUN.runtime.sh
 
 RUN chmod +x /server/RUN.runtime.sh
 
