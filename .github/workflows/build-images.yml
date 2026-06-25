@@ -33,7 +33,7 @@ jobs:
             image: huzige-thrivex-admin
           - name: server
             context: ThriveX-Server
-            file: ThriveX-Server/Dockerfile
+            file: ThriveX-Server/Dockerfile.runtime
             image: huzige-thrivex-server
 
     steps:

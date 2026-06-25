@@ -1,0 +1,26 @@
+FROM eclipse-temurin:11-jre-jammy
+
+ARG VERSION=2.5.2
+
+ENV PORT=9003
+ENV DB_PORT=3306
+ENV DB_NAME=ThriveX
+ENV DB_HOST=mysql
+ENV DB_USERNAME=thrive
+ENV DB_PASSWORD=
+ENV EMAIL_HOST=mail.qq.com
+ENV EMAIL_PORT=465
+ENV EMAIL_USERNAME=
+ENV EMAIL_PASSWORD=
+ENV TZ=Asia/Shanghai
+
+WORKDIR /server
+
+ADD https://github.com/LiuYuYang01/ThriveX-Server/releases/download/${VERSION}/blog.jar /server/app.jar
+COPY RUN.runtime.sh /server/RUN.runtime.sh
+
+RUN chmod +x /server/RUN.runtime.sh
+
+EXPOSE 9003
+
+ENTRYPOINT ["/server/RUN.runtime.sh"]
