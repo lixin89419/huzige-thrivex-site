@@ -21,6 +21,8 @@ import BaiduStatis from '@/components/BaiduStatis';
 import FloatingBlock from '@/components/FloatingBlock';
 import InjectData from '@/components/InjectData';
 
+export const dynamic = 'force-dynamic';
+
 // 加载本地字体
 const LXGWWenKai = localFont({
   src: '../assets/font/LXGWWenKai-Regular.ttf',

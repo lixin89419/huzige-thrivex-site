@@ -9,7 +9,7 @@ interface Equipment {
 
 export default async () => {
   const { data } = await getPageConfigDataByNameAPI('equipment');
-  const value = data?.value as { list: Equipment[] };
+  const value = (data?.value ?? {}) as Partial<{ list: Equipment[] }>;
 
   const defaultItem = {
     name: '未命名设备',
