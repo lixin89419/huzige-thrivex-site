@@ -31,10 +31,6 @@ jobs:
             context: ThriveX-Admin
             file: ThriveX-Admin/dockerfile
             image: huzige-thrivex-admin
-          - name: server
-            context: ThriveX-Server
-            file: ThriveX-Server/Dockerfile.runtime
-            image: huzige-thrivex-server
 
     steps:
       - name: Checkout
@@ -56,10 +52,6 @@ jobs:
           registry: ${{ env.TCR_REGISTRY }}
           username: ${{ secrets.TCR_USERNAME }}
           password: ${{ secrets.TCR_PASSWORD }}
-
-      - name: Download server jar
-        if: matrix.name == 'server'
-        run: curl -fL --retry 5 --retry-delay 3 https://github.com/LiuYuYang01/ThriveX-Server/releases/download/2.5.2/blog.jar -o ThriveX-Server/blog.jar
 
       - name: Build and push ${{ matrix.name }}
         uses: docker/build-push-action@v6

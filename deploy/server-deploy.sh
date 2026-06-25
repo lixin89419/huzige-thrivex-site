@@ -4,7 +4,7 @@ set -Eeuo pipefail
 APP_DIR=${APP_DIR:-/opt/huzige-thrivex}
 REPO_RAW=${REPO_RAW:-https://raw.githubusercontent.com/lixin89419/huzige-thrivex-site/main}
 
-mkdir -p "$APP_DIR/nginx"
+mkdir -p "$APP_DIR/nginx" "$APP_DIR/server"
 cd "$APP_DIR"
 
 if ! command -v docker >/dev/null 2>&1; then
@@ -44,6 +44,7 @@ fi
 curl -fsSL "$REPO_RAW/deploy/docker-compose.prod.yml" -o docker-compose.yml
 curl -fsSL "$REPO_RAW/deploy/nginx/default.conf" -o nginx/default.conf
 curl -fsSL "$REPO_RAW/ThriveX-Server/ThriveX.sql" -o ThriveX.sql
+curl -fL --retry 5 --retry-delay 3 https://github.com/LiuYuYang01/ThriveX-Server/releases/download/2.5.2/blog.jar -o server/app.jar
 
 set -a
 . ./.env

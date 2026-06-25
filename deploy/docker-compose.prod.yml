@@ -33,8 +33,9 @@ services:
       retries: 20
 
   server:
-    image: ccr.ccs.tencentyun.com/huzige/huzige-thrivex-server:latest
+    image: eclipse-temurin:11-jre-alpine
     restart: unless-stopped
+    working_dir: /server
     depends_on:
       mysql:
         condition: service_healthy
@@ -54,8 +55,10 @@ services:
       EMAIL_USERNAME: ${EMAIL_USERNAME:-}
       EMAIL_PASSWORD: ${EMAIL_PASSWORD:-}
       TZ: Asia/Shanghai
+    command: ["sh", "-c", "export DB_INFO=\"$${DB_HOST}:$${DB_PORT}/$${DB_NAME}\" && exec java -jar /server/app.jar"]
     volumes:
-      - upload_data:/server/static/upload
+      - ./server/app.jar:/server/app.jar:ro
+      - upload_data:/server/upload
 
   admin:
     image: ccr.ccs.tencentyun.com/huzige/huzige-thrivex-admin:latest
