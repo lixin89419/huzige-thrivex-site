@@ -1,0 +1,68 @@
+spring:
+  application:
+    name: service-system
+  profiles:
+    active: pro
+  jackson:
+    # 统一下划线格式如：is_del
+#    property-naming-strategy: SNAKE_CASE
+  # 约束文件上传大小
+  servlet.multipart.max-file-size: 10MB
+  servlet.multipart.max-request-size: 100MB
+
+logging.level.org.springframework.mail: DEBUG
+logging.level.org.springframework.boot.autoconfigure.mail: DEBUG
+
+jwt:
+  # 设置jwt签名加密时使用的秘钥
+  secret-key: yuyang
+  # 设置jwt过期时间
+  ttl: 259200000
+  # 设置前端传递过来的令牌名称
+  token-name: Authorization
+
+# API文档配置
+knife4j:
+  enable: true
+
+  # 自定义主页内容
+  openapi:
+    title: ThriveX 在线API文档
+    description: 有些梦虽然遥不可及，但并不是不可能实现!
+    email: liuyuyang1024@yeah.net
+    concat: 刘宇阳
+    url: https://liuyuyang.net
+    version: v4.0
+    license: Apache 2.0
+    terms-of-service-url: https://stackoverflow.com/
+
+    # 分组
+    group:
+      default:
+        group-name: default
+        api-rule: package
+        api-rule-resources:
+          - liuyuyang.net
+
+  # 自定义页脚内容
+  setting:
+    enable-footer: false
+    enable-footer-custom: true
+    footer-custom-content: 互联网从不缺乏天才，而努力才是最终的入场劵!
+
+file:
+  dir: ./upload/
+
+# 使用 @EnumValue 与数据库整型互转（否则默认按枚举名映射会报错）
+mybatis-plus:
+  configuration:
+    default-enum-type-handler: com.baomidou.mybatisplus.core.handlers.MybatisEnumTypeHandler
+
+# 限流注解配置
+blog:
+  limit:
+    tokens: 100     # 所有受限接口统一每周期允许 x 次
+    duration: 60    # 周期统一为 60 秒
+    blacklist:
+      threshold: 10  # 触发黑名单的限流次数阈值
+      duration: 60 # 黑名单持续时间（分钟）

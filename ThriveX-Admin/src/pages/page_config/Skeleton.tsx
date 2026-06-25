@@ -1,0 +1,41 @@
+import TitleSkeleton from '@/components/Title/Skeleton';
+
+export default function ConfigSkeleton() {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <TitleSkeleton titleWidth={96} />
+
+      <div className="grid flex-1 min-h-0 grid-cols-1 gap-y-2 lg:grid-cols-12">
+        <div className="lg:col-span-3 flex flex-col overflow-hidden rounded-xl border border-gray-200 bg-white dark:border-strokedark dark:bg-boxdark">
+          <div className="flex-1 overflow-y-auto">
+            <div className="flex flex-col p-2 gap-0.5">
+              {Array.from({ length: 6 }).map((_, i) => (
+                <div key={i} className="flex items-center gap-3 rounded-lg px-3 py-2.5">
+                  <div className="skeleton h-8 w-8 shrink-0 rounded-lg" />
+                  <div className="flex flex-1 flex-col gap-1">
+                    <div className="skeleton h-4 w-24 rounded" />
+                    <div className="skeleton h-3 w-32 rounded" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="lg:col-span-9 flex min-h-0 flex-col overflow-hidden rounded-xl border border-gray-200 bg-white dark:border-strokedark dark:bg-boxdark lg:mx-2">
+          <div className="flex shrink-0 items-center justify-between border-b border-gray-100 px-5 py-3 dark:border-strokedark">
+            <div className="skeleton h-4 w-32 rounded" />
+            <div className="flex items-center gap-1">
+              <div className="skeleton size-8 rounded-lg" />
+              <div className="skeleton size-8 rounded-lg" />
+            </div>
+          </div>
+
+          <div className="flex min-h-0 flex-1 flex-col p-4">
+            <div className="skeleton min-h-0 flex-1 w-full rounded-lg" />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

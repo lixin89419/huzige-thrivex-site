@@ -1,0 +1,880 @@
+package liuyuyang.net.web.service.impl;
+
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import liuyuyang.net.enums.article.ArticleStatusEnum;
+import liuyuyang.net.core.execption.CustomException;
+import liuyuyang.net.core.utils.CommonUtils;
+import liuyuyang.net.dto.article.ArticleFormDTO;
+import liuyuyang.net.model.*;
+import liuyuyang.net.dto.PageDTO;
+import liuyuyang.net.dto.article.ArticleFilterDTO;
+import liuyuyang.net.vo.article.ArticleVO;
+import liuyuyang.net.vo.cate.CateVO;
+import liuyuyang.net.web.mapper.*;
+import liuyuyang.net.web.service.ArticleCateService;
+import liuyuyang.net.web.service.ArticleService;
+import liuyuyang.net.web.service.ArticleTagService;
+import liuyuyang.net.web.service.CateService;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.BeanUtils;
+import org.springframework.http.ResponseEntity;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.multipart.MultipartFile;
+
+import javax.annotation.Resource;
+import javax.validation.constraints.NotNull;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.time.LocalDateTime;
+import java.util.*;
+import java.util.stream.Collectors;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
+import java.util.Collection;
+
+@Service
+@Transactional
+@Slf4j
+public class ArticleServiceImpl extends ServiceImpl<ArticleMapper, Article> implements ArticleService {
+    @Resource
+    private ArticleMapper articleMapper;
+    @Resource
+    private ArticleTagMapper articleTagMapper;
+    @Resource
+    private ArticleTagService articleTagService;
+    @Resource
+    private ArticleCateMapper articleCateMapper;
+    @Resource
+    private ArticleCateService articleCateService;
+    @Resource
+    private ArticleConfigMapper articleConfigMapper;
+    @Resource
+    private TagMapper tagMapper;
+    @Resource
+    private CateMapper cateMapper;
+    @Resource
+    private CateService cateService;
+    @Resource
+    private CommentMapper commentMapper;
+    @Resource
+    private CommonUtils commonUtils;
+
+    @NotNull
+    private static LambdaQueryWrapper<Article> getArticleQueryWrapper(ArticleFilterDTO articleFilterDTO) {
+        LambdaQueryWrapper<Article> queryWrapper = new LambdaQueryWrapper<>();
+        queryWrapper.orderByDesc(Article::getCreateTime);
+
+        // 根据关键字通过标题过滤出对应文章数据
+        if (articleFilterDTO.getTitle() != null && !articleFilterDTO.getTitle().isEmpty()) {
+            queryWrapper.like(Article::getTitle, "%" + articleFilterDTO.getTitle() + "%");
+        }
+
+        // 根据开始与结束时间过滤
+        if (articleFilterDTO.getStartDate() != null && articleFilterDTO.getEndDate() != null) {
+            queryWrapper.between(Article::getCreateTime, articleFilterDTO.getStartDate(), articleFilterDTO.getEndDate());
+        } else if (articleFilterDTO.getStartDate() != null) {
+            queryWrapper.ge(Article::getCreateTime, articleFilterDTO.getStartDate());
+        } else if (articleFilterDTO.getEndDate() != null) {
+            queryWrapper.le(Article::getCreateTime, articleFilterDTO.getEndDate());
+        }
+        return queryWrapper;
+    }
+
+    @Override
+    public void addArticleData(ArticleFormDTO articleFormDTO) {
+        Article article = new Article();
+        BeanUtils.copyProperties(articleFormDTO, article);
+        articleMapper.insert(article);
+
+        // 新增分类
+        List<Integer> cateIdList = articleFormDTO.getCateIds();
+        if (!cateIdList.isEmpty()) {
+            ArrayList<ArticleCate> cateArrayList = new ArrayList<>(cateIdList.size());
+            for (Integer id : cateIdList) {
+                ArticleCate articleCate = new ArticleCate();
+                articleCate.setArticleId(article.getId());
+                articleCate.setCateId(id);
+                cateArrayList.add(articleCate);
+            }
+            articleCateService.saveBatch(cateArrayList);
+        }
+
+        // 新增标签
+        List<Integer> tagIdList = articleFormDTO.getTagIds();
+
+        if (tagIdList != null && !tagIdList.isEmpty()) {
+            ArrayList<ArticleTag> tagArrayList = new ArrayList<>(tagIdList.size());
+            for (Integer id : tagIdList) {
+                ArticleTag articleTag = new ArticleTag();
+                articleTag.setArticleId(article.getId());
+                articleTag.setTagId(id);
+                tagArrayList.add(articleTag);
+            }
+            articleTagService.saveBatch(tagArrayList);
+        }
+
+        // 新增文章配置
+        ArticleConfig config = articleFormDTO.getConfig();
+        ArticleConfig articleConfig = new ArticleConfig();
+        articleConfig.setArticleId(article.getId());
+        articleConfig.setStatus(config.getStatus() != null ? config.getStatus() : ArticleStatusEnum.DEFAULT);
+        articleConfig.setPassword(config.getPassword());
+        articleConfig.setIsDraft(config.getIsDraft());
+        articleConfig.setIsEncrypt(config.getIsEncrypt());
+        articleConfig.setIsDel(false);
+
+        articleConfigMapper.insert(articleConfig);
+    }
+
+    @Override
+    public void delArticleData(Integer id, Integer is_del) {
+        LambdaQueryWrapper<ArticleConfig> articleConfigLambdaQueryWrapper = new LambdaQueryWrapper<>();
+        articleConfigLambdaQueryWrapper.eq(ArticleConfig::getArticleId, id);
+        ArticleConfig articleConfig = articleConfigMapper.selectOne(articleConfigLambdaQueryWrapper);
+
+        // 严格删除：直接从数据库删除
+        if (is_del == 0) {
+            // 删除文章关联的数据
+            delArticleCorrelationData(id);
+
+            // 删除当前文章
+            articleMapper.deleteById(id);
+        }
+
+        // 普通删除：更改 is_del 字段，到时候可以通过更改字段恢复
+        if (is_del == 1) {
+            articleConfig.setIsDel(true);
+            articleConfigMapper.updateById(articleConfig);
+        }
+
+        if (is_del != 0 && is_del != 1) {
+            throw new CustomException("参数有误：请选择是否严格删除");
+        }
+    }
+
+    @Override
+    public void recoveryArticleData(Integer id) {
+        LambdaQueryWrapper<ArticleConfig> articleConfigLambdaQueryWrapper = new LambdaQueryWrapper<>();
+        articleConfigLambdaQueryWrapper.eq(ArticleConfig::getArticleId, id);
+        ArticleConfig articleConfig = articleConfigMapper.selectOne(articleConfigLambdaQueryWrapper);
+        articleConfig.setIsDel(false);
+        articleConfigMapper.updateById(articleConfig);
+    }
+
+    @Override
+    public void delBatchArticleData(List<Integer> ids) {
+        delArticleCorrelationData(ids);
+
+        // 批量删除文章
+        if (ids == null || ids.isEmpty())
+            return;
+
+        LambdaQueryWrapper<Article> queryWrapperArticle = new LambdaQueryWrapper<>();
+        queryWrapperArticle.in(Article::getId, ids);
+        articleMapper.delete(queryWrapperArticle);
+    }
+
+    @Override
+    public void editArticleData(ArticleFormDTO articleFormDTO) {
+        if (articleFormDTO.getCateIds() == null || articleFormDTO.getCateIds().isEmpty())
+            throw new CustomException("编辑失败：请绑定分类");
+
+        // 删除文章关联的数据
+        delArticleCorrelationData(articleFormDTO.getId());
+        // 重新绑定分类
+        if (articleFormDTO.getCateIds() != null && !articleFormDTO.getCateIds().isEmpty()) {
+            for (Integer id : articleFormDTO.getCateIds()) {
+                ArticleCate articleCate = new ArticleCate();
+                articleCate.setArticleId(articleFormDTO.getId());
+                articleCate.setCateId(id);
+                articleCateMapper.insert(articleCate);
+            }
+        }
+
+        // 重新绑定标签
+        if (articleFormDTO.getTagIds() != null && !articleFormDTO.getTagIds().isEmpty()) {
+            for (Integer id : articleFormDTO.getTagIds()) {
+                ArticleTag articleTag = new ArticleTag();
+                articleTag.setArticleId(articleFormDTO.getId());
+                articleTag.setTagId(id);
+                articleTagMapper.insert(articleTag);
+            }
+        }
+
+        // 重新绑定文章配置
+        ArticleConfig config = articleFormDTO.getConfig();
+        ArticleConfig articleConfig = new ArticleConfig();
+        articleConfig.setArticleId(articleFormDTO.getId());
+        articleConfig.setStatus(config.getStatus() != null ? config.getStatus() : ArticleStatusEnum.DEFAULT);
+        articleConfig.setPassword(config.getPassword());
+        articleConfig.setIsDraft(Boolean.TRUE.equals(config.getIsDraft()));
+        articleConfig.setIsEncrypt(Boolean.TRUE.equals(config.getIsEncrypt()));
+        articleConfig.setIsDel(false);
+        articleConfigMapper.insert(articleConfig);
+
+        Article article = new Article();
+        BeanUtils.copyProperties(articleFormDTO, article);
+
+        // 修改文章
+        articleMapper.updateById(article);
+    }
+
+    @Override
+    public ArticleVO getArticleData(Integer id, String password) {
+        ArticleVO data = bindingArticleData(id);
+
+        String description = data.getDescription();
+        String content = data.getContent();
+
+        boolean isAdmin = CommonUtils.isAdmin();
+
+        ArticleConfig config = data.getConfig();
+
+        if (!Boolean.TRUE.equals(data.getConfig().getIsEncrypt()) && !password.isEmpty()) {
+            throw new CustomException(610, "该文章不需要访问密码");
+        }
+
+        // 普通用户对特定的文章无权查看
+        if (!isAdmin) {
+            if (Boolean.TRUE.equals(data.getConfig().getIsDel())) {
+                throw new CustomException(404, "该文章已被删除");
+            }
+
+            if (ArticleStatusEnum.HIDE.equals(config.getStatus())) {
+                throw new CustomException(611, "该文章已被隐藏");
+            }
+
+            // 如果有密码就必须通过密码才能查看
+            if (Boolean.TRUE.equals(data.getConfig().getIsEncrypt())) {
+                // 如果需要访问密码且没有传递密码参数
+                if (password.isEmpty()) {
+                    throw new CustomException(612, "请输入文章访问密码");
+                }
+
+                data.setDescription("该文章需要密码才能查看");
+                data.setContent("该文章需要密码才能查看");
+
+                // 验证密码是否正确
+                if (config.getPassword().equals(password)) {
+                    data.setDescription(description);
+                    data.setContent(content);
+                } else {
+                    throw new CustomException(613, "文章访问密码错误");
+                }
+            }
+        }
+
+        // 获取当前文章的创建时间
+        Long createTime = data.getCreateTime();
+
+        // 查询上一篇文章
+        LambdaQueryWrapper<Article> prevQueryWrapper = new LambdaQueryWrapper<>();
+        prevQueryWrapper.lt(Article::getCreateTime, createTime).orderByDesc(Article::getCreateTime).last("LIMIT 1");
+        Article prevArticle = articleMapper.selectOne(prevQueryWrapper);
+
+        if (prevArticle != null) {
+            // 检查文章配置
+            LambdaQueryWrapper<ArticleConfig> prevConfigWrapper = new LambdaQueryWrapper<>();
+            prevConfigWrapper.eq(ArticleConfig::getArticleId, prevArticle.getId()).eq(ArticleConfig::getIsDel, false);
+            ArticleConfig prevConfig = articleConfigMapper.selectOne(prevConfigWrapper);
+
+            if (prevConfig != null) {
+                Map<String, Object> resultPrev = new HashMap<>();
+                resultPrev.put("id", prevArticle.getId());
+                resultPrev.put("title", prevArticle.getTitle());
+                data.setPrev(resultPrev);
+            }
+        }
+
+        // 查询下一篇文章
+        LambdaQueryWrapper<Article> nextQueryWrapper = new LambdaQueryWrapper<>();
+        nextQueryWrapper.gt(Article::getCreateTime, createTime).orderByAsc(Article::getCreateTime).last("LIMIT 1");
+        Article nextArticle = articleMapper.selectOne(nextQueryWrapper);
+
+        if (nextArticle != null) {
+            // 检查文章配置
+            LambdaQueryWrapper<ArticleConfig> nextConfigWrapper = new LambdaQueryWrapper<>();
+            nextConfigWrapper.eq(ArticleConfig::getArticleId, nextArticle.getId()).eq(ArticleConfig::getIsDel, false);
+            ArticleConfig nextConfig = articleConfigMapper.selectOne(nextConfigWrapper);
+
+            if (nextConfig != null) {
+                Map<String, Object> resultNext = new HashMap<>();
+                resultNext.put("id", nextArticle.getId());
+                resultNext.put("title", nextArticle.getTitle());
+                data.setNext(resultNext);
+            }
+        }
+
+        return data;
+    }
+
+    // 处理文章数据
+    @Override
+    public List<ArticleVO> processArticleData(ArticleFilterDTO articleFilterDTO) {
+        // 首先根据文章配置表的条件筛选出符合条件的文章ID
+        LambdaQueryWrapper<ArticleConfig> configQueryWrapper = new LambdaQueryWrapper<>();
+
+        // 根据草稿状态筛选
+        if (articleFilterDTO.getIsDraft() != null) {
+            configQueryWrapper.eq(ArticleConfig::getIsDraft, articleFilterDTO.getIsDraft());
+        }
+
+        // 根据删除状态筛选
+        if (articleFilterDTO.getIsDel() != null) {
+            configQueryWrapper.eq(ArticleConfig::getIsDel, articleFilterDTO.getIsDel());
+        }
+
+        // 获取符合条件的文章ID列表
+        List<Integer> articleIds = articleConfigMapper.selectList(configQueryWrapper)
+                .stream()
+                .map(ArticleConfig::getArticleId)
+                .collect(Collectors.toList());
+
+        // 如果没有找到符合条件的文章ID，直接返回空列表
+        if (articleIds.isEmpty()) {
+            return new ArrayList<>();
+        }
+
+        // 构建文章查询条件
+        LambdaQueryWrapper<Article> queryWrapper = queryWrapperArticle(articleFilterDTO);
+        queryWrapper.in(Article::getId, articleIds);
+        List<Article> list = articleMapper.selectList(queryWrapper);
+
+        boolean isAdmin = CommonUtils.isAdmin();
+
+        // 绑定数据 + 统一的展示规则（过滤隐藏文章 + 处理加密文章）
+        return list.stream()
+                .map(article -> bindingArticleData(article.getId()))
+                .filter(article -> shouldShowInList(article, isAdmin))
+                .map(this::maskIfEncrypted)
+                .collect(Collectors.toList());
+    }
+
+    @Override
+    public Page<ArticleVO> getArticleList(ArticleFilterDTO articleFilterDTO) {
+        List<ArticleVO> list = processArticleData(articleFilterDTO);
+
+        boolean isAdmin = CommonUtils.isAdmin();
+        if (!isAdmin) {
+            // 统一使用展示规则控制首页可见性
+            list = list.stream()
+                    .filter(this::shouldShowOnHomeForNonAdmin)
+                    .collect(Collectors.toList());
+        }
+
+        return commonUtils.paginate(articleFilterDTO, list);
+    }
+
+    // 获取指定分类中所有文章
+    @Override
+    public Page<ArticleVO> getCateArticleList(Integer id, PageDTO pageDTO) {
+        Cate cate = cateMapper.selectById(id);
+        if (cate == null || (!CommonUtils.isAdmin() && Boolean.TRUE.equals(cate.getIsHide()))) {
+            throw new CustomException("该分类不存在");
+        }
+
+        // 通过分类 id 查询出所有文章id
+        LambdaQueryWrapper<ArticleCate> queryWrapperArticleCate = new LambdaQueryWrapper<>();
+        queryWrapperArticleCate.eq(ArticleCate::getCateId, id); // 修改in为eq,因为只查询单个分类
+        List<Integer> articleIds = articleCateMapper.selectList(queryWrapperArticleCate).stream()
+                .map(ArticleCate::getArticleId)
+                .collect(Collectors.toList());
+
+        // 有数据就查询，没有就返回空数组
+        if (articleIds.isEmpty()) {
+            return commonUtils.paginate(pageDTO, new ArrayList<>());
+        }
+
+        LambdaQueryWrapper<ArticleConfig> articleConfigLambdaQueryWrapper = new LambdaQueryWrapper<>();
+        articleConfigLambdaQueryWrapper.in(ArticleConfig::getArticleId, articleIds);
+        articleConfigLambdaQueryWrapper.eq(ArticleConfig::getIsDraft, false);
+        articleConfigLambdaQueryWrapper.eq(ArticleConfig::getIsDel, false);
+        articleIds = articleConfigMapper.selectList(articleConfigLambdaQueryWrapper).stream()
+                .map(ArticleConfig::getArticleId).collect(Collectors.toList());
+
+        // 去重避免 IN 条件膨胀（理论上可能出现重复 article_id）
+        articleIds = articleIds.stream().distinct().collect(Collectors.toList());
+
+        // 如果过滤后没有文章,直接返回空页
+        if (articleIds.isEmpty()) {
+            return commonUtils.paginate(pageDTO, new ArrayList<>());
+        }
+
+        // 构建文章查询条件
+        LambdaQueryWrapper<Article> queryWrapperArticle = new LambdaQueryWrapper<Article>()
+                .in(Article::getId, articleIds)
+                .orderByDesc(Article::getCreateTime);
+
+        List<Article> articles = articleMapper.selectList(queryWrapperArticle);
+        List<ArticleVO> vos = processArticleList(articles);
+        return commonUtils.paginate(pageDTO, vos);
+    }
+
+    @Override
+    public Page<ArticleVO> getTagArticleList(Integer id, PageDTO pageDTO) {
+        // 通过标签 id 查询出所有文章 id
+        LambdaQueryWrapper<ArticleTag> queryWrapperArticleTag = new LambdaQueryWrapper<>();
+        queryWrapperArticleTag.eq(ArticleTag::getTagId, id);
+        List<Integer> articleIds = articleTagMapper.selectList(queryWrapperArticleTag).stream()
+                .map(ArticleTag::getArticleId)
+                .collect(Collectors.toList());
+
+        // 有数据就查询，没有就返回空数组
+        if (articleIds.isEmpty()) {
+            return commonUtils.paginate(pageDTO, new ArrayList<>());
+        }
+
+        LambdaQueryWrapper<ArticleConfig> articleConfigLambdaQueryWrapper = new LambdaQueryWrapper<>();
+        articleConfigLambdaQueryWrapper.in(ArticleConfig::getArticleId, articleIds);
+        articleConfigLambdaQueryWrapper.eq(ArticleConfig::getIsDraft, false);
+        articleConfigLambdaQueryWrapper.eq(ArticleConfig::getIsDel, false);
+        articleIds = articleConfigMapper.selectList(articleConfigLambdaQueryWrapper).stream()
+                .map(ArticleConfig::getArticleId).collect(Collectors.toList());
+
+        // 如果过滤后没有文章,直接返回空页
+        if (articleIds.isEmpty()) {
+            return commonUtils.paginate(pageDTO, new ArrayList<>());
+        }
+
+        // 构建文章查询条件
+        LambdaQueryWrapper<Article> queryWrapperArticle = new LambdaQueryWrapper<>();
+        queryWrapperArticle.in(Article::getId, articleIds).orderByDesc(Article::getCreateTime);
+
+        List<Article> articles = articleMapper.selectList(queryWrapperArticle);
+        List<ArticleVO> vos = processArticleList(articles);
+        return commonUtils.paginate(pageDTO, vos);
+    }
+
+    /**
+     * 绑定数据、处理加密文章、过滤隐藏文章
+     */
+    private List<ArticleVO> processArticleList(List<Article> articles) {
+        return articles.stream()
+                .map(article -> {
+                    ArticleVO boundArticle = bindingArticleData(article.getId());
+                    // 分类/标签页默认按普通用户规则展示
+                    if (!shouldShowInList(boundArticle, false)) {
+                        return null;
+                    }
+                    return maskIfEncrypted(boundArticle);
+                })
+                .filter(Objects::nonNull)
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * 是否在列表中展示（管理员可见所有，普通用户不展示隐藏文章）
+     */
+    private boolean shouldShowInList(ArticleVO article, boolean isAdmin) {
+        ArticleConfig config = article.getConfig();
+        // 如果没有配置就展示
+        if (config == null)
+            return true;
+        // 管理员可见所有文章
+        if (isAdmin)
+            return true;
+        // 非管理员不能看到隐藏文章
+        return !Objects.equals(config.getStatus(), ArticleStatusEnum.HIDE);
+    }
+
+    /**
+     * 非管理员首页是否展示（在列表可见的基础上，再过滤 no_home）
+     */
+    private boolean shouldShowOnHomeForNonAdmin(ArticleVO article) {
+        ArticleConfig config = article.getConfig();
+        if (config == null) {
+            return true;
+        }
+        return !Objects.equals(config.getStatus(), ArticleStatusEnum.NO_HOME);
+    }
+
+    /**
+     * 如果文章是加密的，则打马赛克提示
+     */
+    private ArticleVO maskIfEncrypted(ArticleVO article) {
+        ArticleConfig config = article.getConfig();
+        if (config != null && Boolean.TRUE.equals(config.getIsEncrypt())) {
+            article.setDescription("该文章是加密的");
+            article.setContent("该文章是加密的");
+        }
+        return article;
+    }
+
+    @Override
+    public List<ArticleVO> getRandomArticleList(Integer count) {
+        // 一次性从配置表筛选出符合条件的文章ID，避免 N+1 查询
+        LambdaQueryWrapper<ArticleConfig> articleConfigLambdaQueryWrapper = new LambdaQueryWrapper<>();
+        articleConfigLambdaQueryWrapper.eq(ArticleConfig::getIsDraft, false);
+        articleConfigLambdaQueryWrapper.eq(ArticleConfig::getIsDel, false);
+        articleConfigLambdaQueryWrapper.eq(ArticleConfig::getStatus, ArticleStatusEnum.DEFAULT);
+        articleConfigLambdaQueryWrapper.eq(ArticleConfig::getPassword, "");
+
+        List<Integer> ids = articleConfigMapper.selectList(articleConfigLambdaQueryWrapper)
+                .stream()
+                .map(ArticleConfig::getArticleId)
+                .collect(Collectors.toList());
+
+        // 优化：提前返回
+        if (ids.isEmpty())
+            return new ArrayList<>();
+
+        // 如果总数不超过 count，沿用原有行为：直接通过 get 返回完整文章数据（包含权限等处理）
+        if (ids.size() <= count) {
+            return ids.stream()
+                    .map(id -> getArticleData(id, ""))
+                    .collect(Collectors.toList());
+        }
+
+        // 随机打乱文章ID列表并截取前 count 个
+        Collections.shuffle(ids, new Random());
+        List<Integer> randomArticleIds = ids.subList(0, count);
+
+        // 与原逻辑保持一致，大量数据时仅做绑定，不走 get 的密码/上下篇逻辑
+        return randomArticleIds.stream()
+                .map(this::bindingArticleData)
+                .collect(Collectors.toList());
+    }
+
+    @Override
+    public List<ArticleVO> getHotArticleList(Integer count) {
+        LambdaQueryWrapper<Article> queryWrapper = new LambdaQueryWrapper<>();
+        queryWrapper.orderByDesc(Article::getView).last("LIMIT " + count);
+        return articleMapper.selectList(queryWrapper).stream()
+                .map(a -> bindingArticleData(a.getId()))
+                .collect(Collectors.toList());
+    }
+
+    @Override
+    public void recordViewArticleData(Integer id) {
+        Article data = articleMapper.selectById(id);
+        if (data == null)
+            throw new CustomException("获取失败：该文章不存在");
+        data.setView(data.getView() + 1);
+        articleMapper.updateById(data);
+    }
+
+    // 关联文章数据
+    @Override
+    public ArticleVO bindingArticleData(Integer id) {
+        Article entity = articleMapper.selectById(id);
+        if (entity == null)
+            throw new CustomException("获取文章失败：该文章不存在");
+
+        ArticleVO data = new ArticleVO();
+        BeanUtils.copyProperties(entity, data);
+
+        // 查询当前文章的分类ID
+        LambdaQueryWrapper<ArticleCate> queryWrapperCateIds = new LambdaQueryWrapper<>();
+        queryWrapperCateIds.eq(ArticleCate::getArticleId, id);
+        List<Integer> cate_ids = articleCateMapper.selectList(queryWrapperCateIds).stream().map(ArticleCate::getCateId)
+                .collect(Collectors.toList());
+
+        // 如果有分类，则绑定分类信息（仅返回文章关联的分类，而非整棵分类树）
+        if (!cate_ids.isEmpty()) {
+            LambdaQueryWrapper<Cate> queryWrapperCateList = new LambdaQueryWrapper<>();
+            queryWrapperCateList.in(Cate::getId, cate_ids);
+            List<CateVO> cates = cateMapper.selectList(queryWrapperCateList).stream().map(cate -> {
+                CateVO cateVO = new CateVO();
+                BeanUtils.copyProperties(cate, cateVO);
+                return cateVO;
+            }).collect(Collectors.toList());
+            data.setCateList(cates);
+        }
+
+        // 查询当前文章的标签ID
+        LambdaQueryWrapper<ArticleTag> queryWrapperTagIds = new LambdaQueryWrapper<>();
+        queryWrapperTagIds.eq(ArticleTag::getArticleId, id);
+        List<Integer> tag_ids = articleTagMapper.selectList(queryWrapperTagIds).stream().map(ArticleTag::getTagId)
+                .collect(Collectors.toList());
+
+        if (!tag_ids.isEmpty()) {
+            LambdaQueryWrapper<Tag> queryWrapperTagList = new LambdaQueryWrapper<>();
+            queryWrapperTagList.in(Tag::getId, tag_ids);
+            List<Tag> tags = tagMapper.selectList(queryWrapperTagList);
+            data.setTagList(tags);
+        }
+
+        data.setComment(commentMapper.getCommentList(id).size());
+
+        // 查找文章配置
+        LambdaQueryWrapper<ArticleConfig> queryWrapper = new LambdaQueryWrapper<>();
+        queryWrapper.eq(ArticleConfig::getArticleId, id);
+        ArticleConfig articleConfig = articleConfigMapper.selectOne(queryWrapper);
+        data.setConfig(articleConfig);
+
+        return data;
+    }
+
+    // 过滤文章数据
+    @Override
+    public LambdaQueryWrapper<Article> queryWrapperArticle(ArticleFilterDTO articleFilterDTO) {
+        LambdaQueryWrapper<Article> queryWrapper = getArticleQueryWrapper(articleFilterDTO);
+
+        // 根据分类 id 过滤（cateIds 数组，满足任一分类即可）
+        List<Integer> filterCateIds = articleFilterDTO.getCateIds() == null
+                ? Collections.emptyList()
+                : articleFilterDTO.getCateIds().stream().distinct().collect(Collectors.toList());
+
+        if (!filterCateIds.isEmpty()) {
+            LambdaQueryWrapper<ArticleCate> queryWrapperArticleIds = new LambdaQueryWrapper<>();
+            queryWrapperArticleIds.in(ArticleCate::getCateId, filterCateIds);
+            List<Integer> articleIds = articleCateMapper.selectList(queryWrapperArticleIds).stream()
+                    .map(ArticleCate::getArticleId).distinct().collect(Collectors.toList());
+
+            if (!articleIds.isEmpty()) {
+                queryWrapper.in(Article::getId, articleIds);
+            } else {
+                // 添加一个始终为假的条件
+                queryWrapper.in(Article::getId, -1); // -1 假设为不存在的ID
+            }
+        }
+
+        // 根据标签id过滤
+        if (articleFilterDTO.getTagId() != null) {
+            LambdaQueryWrapper<ArticleTag> queryWrapperArticleIds = new LambdaQueryWrapper<>();
+            queryWrapperArticleIds.eq(ArticleTag::getTagId, articleFilterDTO.getTagId());
+            List<Integer> articleIds = articleTagMapper.selectList(queryWrapperArticleIds).stream()
+                    .map(ArticleTag::getArticleId).collect(Collectors.toList());
+
+            if (!articleIds.isEmpty()) {
+                queryWrapper.in(Article::getId, articleIds);
+            } else {
+                // 添加一个始终为假的条件
+                queryWrapper.in(Article::getId, -1); // -1 假设为不存在的ID
+            }
+        }
+
+        return queryWrapper;
+    }
+
+    // 删除文章关联的数据（支持单个和批量）
+    public void delArticleCorrelationData(Collection<Integer> ids) {
+        if (ids == null || ids.isEmpty())
+            return;
+
+        // 删除绑定的分类
+        LambdaQueryWrapper<ArticleCate> queryWrapperCate = new LambdaQueryWrapper<>();
+        queryWrapperCate.in(ArticleCate::getArticleId, ids);
+        articleCateMapper.delete(queryWrapperCate);
+
+        // 删除绑定的标签
+        LambdaQueryWrapper<ArticleTag> queryWrapperTag = new LambdaQueryWrapper<>();
+        queryWrapperTag.in(ArticleTag::getArticleId, ids);
+        articleTagMapper.delete(queryWrapperTag);
+
+        // 删除文章配置
+        LambdaQueryWrapper<ArticleConfig> queryWrapperArticleConfig = new LambdaQueryWrapper<>();
+        queryWrapperArticleConfig.in(ArticleConfig::getArticleId, ids);
+        articleConfigMapper.delete(queryWrapperArticleConfig);
+    }
+
+    public void delArticleCorrelationData(Integer id) {
+        if (id == null)
+            return;
+        delArticleCorrelationData(Collections.singletonList(id));
+    }
+
+    @Override
+    public void importArticleList(MultipartFile[] list) throws IOException {
+        if (list == null || list.length == 0)
+            throw new CustomException("导入失败：文件列表为空");
+
+        // 验证所有文件格式
+        for (MultipartFile file : list) {
+            if (file == null || file.getOriginalFilename() == null || !file.getOriginalFilename().endsWith(".md")) {
+                throw new CustomException("导入失败：请确保所有文件都是 .md 格式");
+            }
+        }
+
+        // 如果所有文件格式都正确，则继续处理
+        for (MultipartFile file : list) {
+            // 读取文件内容
+            String content = new String(file.getBytes(), StandardCharsets.UTF_8);
+
+            // 解析 Markdown 内容
+            String[] lines = content.split("\n");
+            String title = "";
+            String description = "";
+            StringBuilder articleContent = new StringBuilder();
+
+            // 提取标题（第一个 # 开头的行）
+            for (String line : lines) {
+                if (line.startsWith("# ")) {
+                    title = line.substring(2).trim();
+                    break;
+                }
+            }
+
+            // 提取描述（第一个空行后的第一段）
+            boolean foundDescription = false;
+            for (String line : lines) {
+                if (line.trim().isEmpty()) {
+                    foundDescription = true;
+                    continue;
+                }
+                if (foundDescription && !line.startsWith("#")) {
+                    description = line.trim();
+                    break;
+                }
+            }
+
+            // 提取文章内容（跳过标题和描述后的所有内容）
+            boolean startContent = false;
+            for (String line : lines) {
+                if (line.trim().isEmpty()) {
+                    startContent = true;
+                    continue;
+                }
+                if (startContent) {
+                    articleContent.append(line).append("\n");
+                }
+            }
+
+            // 创建文章对象
+            ArticleFormDTO article = new ArticleFormDTO();
+            article.setTitle(title);
+            article.setDescription(description);
+            article.setContent(articleContent.toString().trim());
+            article.setCreateTime(System.currentTimeMillis());
+
+            // 设置默认分类（这里假设使用 ID 为 1 的分类）
+            article.setCateIds(Collections.singletonList(1));
+
+            // 设置默认文章配置
+            ArticleConfig config = new ArticleConfig();
+            config.setStatus(ArticleStatusEnum.DEFAULT);
+            config.setPassword("");
+            config.setIsDraft(false);
+            config.setIsEncrypt(false);
+            config.setIsDel(false);
+            article.setConfig(config);
+
+            // 保存文章
+            addArticleData(article);
+        }
+    }
+
+    @Override
+    public ResponseEntity<byte[]> exportArticleList(List<Integer> ids) {
+        // 创建一个临时目录用于存储导出的Markdown文件
+        java.io.File tempDir = new java.io.File(System.getProperty("java.io.tmpdir"), "exported_articles");
+
+        if (!tempDir.exists() && !tempDir.mkdirs()) {
+            throw new CustomException("无法创建临时目录");
+        }
+
+        if (ids == null || ids.isEmpty()) {
+            // 查询所有的文章
+            List<Article> list = this.lambdaQuery().select(Article::getId).list();
+            if (list == null || list.isEmpty()) {
+                throw new CustomException("没有文章可以导出");
+            }
+            ids = list.stream().map(Article::getId).collect(Collectors.toList());
+        }
+
+        try {
+            // 遍历文章ID列表，生成Markdown文件
+            for (Integer id : ids) {
+                Article article = getById(id);
+                if (article != null) {
+                    String markdownContent = buildMarkdownContent(article);
+                    String fileName = sanitizeFileName(article.getTitle()) + ".md";
+                    java.io.File markdownFile = new java.io.File(tempDir, fileName);
+                    try (java.io.FileWriter writer = new java.io.FileWriter(markdownFile)) {
+                        writer.write(markdownContent);
+                    } catch (IOException e) {
+                        throw new CustomException("写入Markdown文件失败");
+                    }
+                }
+            }
+
+            // 将所有Markdown文件压缩为一个ZIP文件
+            ByteArrayOutputStream zipOutputStream = new ByteArrayOutputStream();
+            try (ZipOutputStream zos = new ZipOutputStream(zipOutputStream)) {
+                for (java.io.File file : Objects.requireNonNull(tempDir.listFiles())) {
+                    if (file.isFile() && file.getName().endsWith(".md")) {
+                        try (java.io.FileInputStream fis = new java.io.FileInputStream(file)) {
+                            ZipEntry zipEntry = new ZipEntry(file.getName());
+                            zos.putNextEntry(zipEntry);
+                            byte[] buffer = new byte[1024];
+                            int length;
+                            while ((length = fis.read(buffer)) > 0) {
+                                zos.write(buffer, 0, length);
+                            }
+                            zos.closeEntry();
+                        }
+                    }
+                }
+                zos.finish(); // 确保 ZIP 文件正确关闭
+            } catch (Exception e) {
+                log.error("生成 ZIP 文件失败", e);
+                throw new CustomException("生成 ZIP 文件失败");
+            }
+
+            // 获取ZIP文件的字节数组
+            byte[] zipBytes = zipOutputStream.toByteArray();
+
+            // 删除临时目录及其内容
+            java.io.File[] files = tempDir.listFiles();
+            if (files != null) {
+                for (java.io.File file : files) {
+                    if (!file.delete()) {
+                        log.warn("无法删除临时文件: {}", file.getAbsolutePath());
+                    }
+                }
+            }
+
+            if (!tempDir.delete()) {
+                log.warn("无法删除临时目录: {}", tempDir.getAbsolutePath());
+            }
+
+            // 返回ResponseEntity
+            return ResponseEntity.ok()
+                    .header("Content-Disposition", "attachment; filename=articles.zip")
+                    .body(zipBytes);
+        } catch (Exception e) {
+            log.error("导出文章失败", e);
+            throw new CustomException("导出文章失败");
+        }
+    }
+
+    /**
+     * 构建Markdown格式的文章内容
+     */
+    private String buildMarkdownContent(Article article) {
+        StringBuilder content = new StringBuilder();
+
+        // 添加标题
+        content.append("# ").append(article.getTitle()).append("\n\n");
+
+        // 添加描述（如果有）
+        if (article.getDescription() != null && !article.getDescription().isEmpty()) {
+            content.append(article.getDescription()).append("\n\n");
+        }
+
+        // 添加内容
+        content.append(article.getContent());
+
+        // 添加元数据（可选）
+        content.append("\n\n---\n");
+        content.append("导出时间: ").append(LocalDateTime.now()).append("\n");
+        content.append("原文ID: ").append(article.getId()).append("\n");
+
+        return content.toString();
+    }
+
+    /**
+     * 清理文件名，移除非法字符
+     */
+    private String sanitizeFileName(String fileName) {
+        if (fileName == null) {
+            return "untitled";
+        }
+        // 替换Windows和Linux文件系统中的非法字符
+        return fileName.replaceAll("[\\\\/:*?\"<>|]", "_");
+    }
+}

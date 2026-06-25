@@ -1,0 +1,27 @@
+.create_record_page {
+  .ant-input:focus {
+    box-shadow: none !important;
+  }
+  
+  .image-container {
+    position: relative;
+    overflow: hidden;
+    min-height: 0;
+
+    .ant-image,
+    .ant-image-img,
+    .ant-image-mask {
+      width: 100% !important;
+      height: 100% !important;
+    }
+
+    .ant-image {
+      display: block !important;
+    }
+
+    .ant-image-img {
+      object-fit: cover !important;
+      display: block;
+    }
+  }
+}

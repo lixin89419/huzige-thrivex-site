@@ -1,0 +1,1694 @@
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import type { ColumnsType } from 'antd/es/table';
+import {
+  Button,
+  Checkbox,
+  Empty,
+  Form,
+  Image,
+  Input,
+  Modal,
+  Popconfirm,
+  Segmented,
+  Select,
+  Pagination,
+  Spin,
+  Table,
+  Tooltip,
+  message,
+} from 'antd';
+import {
+  FiArrowLeft,
+  FiChevronRight,
+  FiEdit2,
+  FiEye,
+  FiFolderPlus,
+  FiGrid,
+  FiList,
+  FiLoader,
+  FiMinimize2,
+  FiRotateCcw,
+  FiSearch,
+  FiTrash2,
+  FiUploadCloud,
+  FiX,
+} from 'react-icons/fi';
+import dayjs from 'dayjs';
+import { batchDelFileDataAPI, compressFileDataAPI, createDirAPI, deleteDirAPI, delFileDataAPI, getFileDataAPI, getFileListAPI, getFileTreeAPI, queryCompressTasksAPI, renameDirAPI } from '@/api/file';
+import FileUpload from '@/components/FileUpload';
+import Title from '@/components/Title';
+import { File as AppFile, FileCompressItem, FileCompressResult, FileInfo, FileTreeData, FileTreeNode } from '@/types/app/file';
+import Skeleton from './Skeleton';
+import errorImg from './image/error.png';
+import fileSvg from './image/file.svg';
+
+/** 从整棵树推断根目录前缀（如 static/）；多根目录时返回空串，由虚拟根列表展示全部 result */
+function inferRootPathFromTree(data: FileTreeData | null): string {
+  if (!data) return '';
+  if (data.dir) {
+    const d = String(data.dir).trim().replace(/\/+$/, '');
+    if (d) return `${d}/`;
+  }
+  const roots = data.result || [];
+  if (roots.length !== 1) return '';
+  const first = roots[0];
+  if (first?.path) {
+    const seg = first.path.replace(/\/+$/, '').split('/').filter(Boolean)[0];
+    if (seg) return `${seg}/`;
+  }
+  return '';
+}
+
+function normalizePathForRoot(path: string, root: string): string {
+  const cleaned = path.trim().replace(/^\/+/, '').replace(/\/+/g, '/');
+  const rootSeg = root.replace(/\/$/, '');
+  if (!rootSeg) {
+    if (!cleaned) return '';
+    return cleaned.endsWith('/') ? cleaned : `${cleaned}/`;
+  }
+  if (!cleaned) return root;
+  const withRoot = cleaned === rootSeg || cleaned.startsWith(`${rootSeg}/`) ? cleaned : `${rootSeg}/${cleaned}`;
+  return withRoot.endsWith('/') ? withRoot : `${withRoot}/`;
+}
+
+function findNodeInTree(list: FileTreeNode[], targetPath: string, root: string): FileTreeNode | null {
+  const target = normalizePathForRoot(targetPath, root);
+  for (const node of list) {
+    if (normalizePathForRoot(node.path, root) === target) return node;
+    const found = findNodeInTree(node.children, targetPath, root);
+    if (found) return found;
+  }
+  return null;
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(2)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+const FILE_VIEW_STORAGE_KEY = 'thrivex-file-entry-view';
+const DEFAULT_FILE_PAGE_SIZE = 24;
+
+function mapListItemToFile(item: AppFile): AppFile {
+  const ext = item.ext ?? (typeof item.type === 'string' && item.type !== 'file' ? item.type : undefined);
+  return {
+    ...item,
+    ext,
+    createTime: item.createTime ?? item.date,
+  };
+}
+
+type EntryViewMode = 'grid' | 'list';
+
+function compareLocale(a: string, b: string, order: 'ascend' | 'descend'): number {
+  const cmp = a.localeCompare(b, 'zh-CN', { numeric: true, sensitivity: 'base' });
+  return order === 'ascend' ? cmp : -cmp;
+}
+
+/** 目录排序用时间：优先接口字段，否则取当前目录下文件 createTime/date 的最大值 */
+function getDirTimeMs(dir: FileTreeNode): number {
+  const direct = dir.mtime ?? dir.updateTime;
+  if (typeof direct === 'number' && !Number.isNaN(direct)) return direct;
+  let max = 0;
+  for (const f of dir.files ?? []) {
+    const t = f.createTime ?? f.date ?? 0;
+    if (t > max) max = t;
+  }
+  return max;
+}
+
+function sortDirNodes(list: FileTreeNode[], field: 'name' | 'fileCount' | 'totalSize' | 'time', order: 'ascend' | 'descend'): FileTreeNode[] {
+  const next = [...list];
+  next.sort((a, b) => {
+    if (field === 'name') return compareLocale(a.name, b.name, order);
+    if (field === 'fileCount') return order === 'ascend' ? a.fileCount - b.fileCount : b.fileCount - a.fileCount;
+    if (field === 'totalSize') return order === 'ascend' ? a.totalSize - b.totalSize : b.totalSize - a.totalSize;
+    const cmp = getDirTimeMs(a) - getDirTimeMs(b);
+    return order === 'ascend' ? cmp : -cmp;
+  });
+  return next;
+}
+
+function getFileTypeLabel(file: AppFile): string {
+  const ext = file.ext ?? (typeof file.type === 'string' && file.type !== 'file' ? file.type : undefined);
+  if (ext) return String(ext).replace(/^\./, '').toLowerCase();
+  const i = file.name.lastIndexOf('.');
+  return i >= 0 ? file.name.slice(i + 1).toLowerCase() : '—';
+}
+
+/** 文件排序用时间：createTime / date / putTime（与接口字段对齐，缺省为 0） */
+function getFileTimeMs(file: AppFile): number {
+  const t = file.createTime ?? file.date ?? file.putTime;
+  if (typeof t !== 'number' || Number.isNaN(t)) return 0;
+  // 秒级时间戳与毫秒混用时，统一按毫秒比较（小于 1e12 视为秒）
+  return t < 1e12 ? t * 1000 : t;
+}
+
+function sortFiles(list: AppFile[], field: 'name' | 'size' | 'type' | 'time', order: 'ascend' | 'descend'): AppFile[] {
+  const next = [...list];
+  next.sort((a, b) => {
+    if (field === 'name') return compareLocale(a.name, b.name, order);
+    if (field === 'size') return order === 'ascend' ? a.size - b.size : b.size - a.size;
+    if (field === 'type') return compareLocale(getFileTypeLabel(a), getFileTypeLabel(b), order);
+    const cmp = getFileTimeMs(a) - getFileTimeMs(b);
+    return order === 'ascend' ? cmp : -cmp;
+  });
+  return next;
+}
+
+type DirSortField = 'name' | 'fileCount' | 'totalSize' | 'time';
+
+const DIR_SORT_FIELD_OPTIONS: { value: DirSortField; label: string }[] = [
+  { value: 'time', label: '时间' },
+  { value: 'name', label: '名称' },
+  { value: 'fileCount', label: '文件数' },
+  { value: 'totalSize', label: '大小' },
+];
+
+type FileSortField = 'name' | 'size' | 'type' | 'time';
+
+const FILE_SORT_FIELD_OPTIONS: { value: FileSortField; label: string }[] = [
+  { value: 'time', label: '时间' },
+  { value: 'name', label: '名称' },
+  { value: 'size', label: '大小' },
+  { value: 'type', label: '类型' },
+];
+
+/** 供 Table 使用：去掉 `children` 避免被当作树表；子目录个数单独保留 */
+type DirTableRow = Omit<FileTreeNode, 'children'> & { subDirCount: number };
+
+const iconBtnBase =
+  'flex size-8 items-center justify-center rounded-lg transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-40';
+
+function TableIconButton({
+  label,
+  onClick,
+  disabled,
+  danger,
+  children,
+  confirm,
+}: {
+  label: string;
+  onClick?: () => void;
+  disabled?: boolean;
+  danger?: boolean;
+  children: ReactNode;
+  confirm?: {
+    title: string;
+    onConfirm: () => void;
+  };
+}) {
+  const button = (
+    <button
+      type="button"
+      aria-label={label}
+      disabled={disabled}
+      onClick={confirm ? undefined : onClick}
+      className={
+        danger
+          ? `${iconBtnBase} text-red-500 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-500/10`
+          : `${iconBtnBase} text-slate-400 hover:bg-slate-100 hover:text-primary dark:hover:bg-white/5 dark:hover:text-primary`
+      }
+    >
+      {children}
+    </button>
+  );
+
+  const trigger = confirm ? (
+    <Popconfirm title={confirm.title} okText="确定" cancelText="取消" onConfirm={confirm.onConfirm}>
+      {button}
+    </Popconfirm>
+  ) : (
+    button
+  );
+
+  return <Tooltip title={label}>{trigger}</Tooltip>;
+}
+
+function ViewModeToggle({
+  value,
+  onChange,
+}: {
+  value: EntryViewMode;
+  onChange: (mode: EntryViewMode) => void;
+}) {
+  return (
+    <Segmented<EntryViewMode>
+      value={value}
+      onChange={onChange}
+      options={[
+        {
+          label: (
+            <span className="inline-flex items-center gap-1">
+              <FiGrid size={14} />
+              网格
+            </span>
+          ),
+          value: 'grid',
+        },
+        {
+          label: (
+            <span className="inline-flex items-center gap-1">
+              <FiList size={14} />
+              列表
+            </span>
+          ),
+          value: 'list',
+        },
+      ]}
+    />
+  );
+}
+
+function SectionHeading({ title, count }: { title: string; count: number }) {
+  return (
+    <header className="mb-3 flex items-center gap-2">
+      <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100">{title}</h3>
+      <span className="rounded-md bg-slate-100 px-1.5 py-0.5 text-xs font-medium tabular-nums text-slate-500 dark:bg-boxdark-2 dark:text-slate-400">
+        {count}
+      </span>
+    </header>
+  );
+}
+
+function summarizeCompressResult(items: FileCompressItem[]): FileCompressResult {
+  let successCount = 0;
+  let skippedCount = 0;
+  let failedCount = 0;
+  let totalSavedBytes = 0;
+  for (const item of items) {
+    if (item.status === 'success') {
+      successCount++;
+      if (item.beforeSize != null && item.afterSize != null) {
+        totalSavedBytes += Math.max(0, item.beforeSize - item.afterSize);
+      }
+    } else if (item.status === 'skipped') {
+      skippedCount++;
+    } else if (item.status === 'failed') {
+      failedCount++;
+    }
+  }
+  return { items, successCount, skippedCount, failedCount, totalSavedBytes };
+}
+
+function getCompressSummaryText(result: FileCompressResult, processing: boolean): string {
+  const processingCount = result.items.filter((item) => item.status === 'processing').length;
+  if (processing && processingCount > 0) {
+    const done = result.items.length - processingCount;
+    return `正在处理 ${done}/${result.items.length} 张，请稍候…`;
+  }
+  const parts = [`成功 ${result.successCount} 张`];
+  if (result.skippedCount > 0) parts.push(`跳过 ${result.skippedCount} 张`);
+  if (result.failedCount > 0) parts.push(`失败 ${result.failedCount} 张`);
+  let text = parts.join('，');
+  if (result.totalSavedBytes > 0) {
+    text += `，共节省 ${formatFileSize(result.totalSavedBytes)}`;
+  }
+  return text;
+}
+
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+type CompressItemStatus = FileCompressItem['status'];
+
+const COMPRESS_STATUS_META: Record<
+  CompressItemStatus,
+  { label: string; badge: string; dot: string }
+> = {
+  success: {
+    label: '成功',
+    badge: 'bg-emerald-500/10 text-emerald-700 ring-emerald-500/25 dark:text-emerald-400',
+    dot: 'bg-emerald-500',
+  },
+  processing: {
+    label: '处理中',
+    badge: 'bg-sky-500/10 text-sky-700 ring-sky-500/25 dark:text-sky-400',
+    dot: 'bg-sky-500 animate-pulse',
+  },
+  skipped: {
+    label: '跳过',
+    badge: 'bg-amber-500/10 text-amber-700 ring-amber-500/25 dark:text-amber-400',
+    dot: 'bg-amber-500',
+  },
+  failed: {
+    label: '失败',
+    badge: 'bg-red-500/10 text-red-700 ring-red-500/25 dark:text-red-400',
+    dot: 'bg-red-500',
+  },
+  queued: {
+    label: '排队中',
+    badge: 'bg-slate-500/10 text-slate-600 ring-slate-500/20 dark:text-slate-400',
+    dot: 'bg-slate-400',
+  },
+};
+
+function CompressStatusBadge({ status }: { status: CompressItemStatus }) {
+  const meta = COMPRESS_STATUS_META[status] ?? COMPRESS_STATUS_META.failed;
+  return (
+    <span className={`inline-flex shrink-0 items-center rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset ${meta.badge}`}>
+      {meta.label}
+    </span>
+  );
+}
+
+function CompressProgressBar({ percent }: { percent: number }) {
+  const clamped = Math.min(100, Math.max(0, percent));
+  const fillWidth = clamped > 0 ? clamped : 15;
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
+        <span>处理进度</span>
+        <span className="tabular-nums font-medium text-slate-700 dark:text-slate-200">{clamped}%</span>
+      </div>
+      <div className="relative h-2 overflow-hidden rounded-full bg-slate-100 dark:bg-white/10">
+        <div
+          className="relative h-full overflow-hidden rounded-full transition-[width] duration-500 ease-out"
+          style={{ width: `${fillWidth}%` }}
+        >
+          <div className="absolute inset-0 bg-linear-to-r from-primary via-sky-500 to-cyan-400" />
+          <div
+            className="animate-compress-progress-stripes absolute inset-0 opacity-30"
+            style={{
+              backgroundImage:
+                'linear-gradient(45deg, rgba(255,255,255,.35) 25%, transparent 25%, transparent 50%, rgba(255,255,255,.35) 50%, rgba(255,255,255,.35) 75%, transparent 75%, transparent)',
+              backgroundSize: '1rem 1rem',
+            }}
+          />
+          <div className="animate-compress-progress-shine absolute inset-y-0 w-1/2 bg-linear-to-r from-transparent via-white/45 to-transparent" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CompressResultItemRow({ item }: { item: FileCompressItem }) {
+  const meta = COMPRESS_STATUS_META[item.status] ?? COMPRESS_STATUS_META.failed;
+  const savedBytes =
+    item.status === 'success' && item.beforeSize != null && item.afterSize != null
+      ? Math.max(0, item.beforeSize - item.afterSize)
+      : 0;
+  const savedPercent =
+    item.status === 'success' && item.beforeSize != null && item.beforeSize > 0 && item.afterSize != null
+      ? Math.round((savedBytes / item.beforeSize) * 100)
+      : 0;
+
+  return (
+    <li className="rounded-xl border border-slate-200/80 bg-white p-3.5 dark:border-strokedark dark:bg-boxdark-2/60">
+      <div className="flex items-start gap-3">
+        <span className={`mt-1.5 size-2 shrink-0 rounded-full ${meta.dot}`} aria-hidden />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-start justify-between gap-3">
+            <p className="m-0 truncate text-sm font-medium text-slate-800 dark:text-slate-100" title={item.name}>
+              {item.name}
+            </p>
+            <CompressStatusBadge status={item.status} />
+          </div>
+
+          {item.status === 'success' && item.beforeSize != null && item.afterSize != null ? (
+            <div className="mt-3 space-y-2">
+              <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-sm tabular-nums">
+                <span className="text-slate-400 line-through">{formatFileSize(item.beforeSize)}</span>
+                <span className="text-slate-300">→</span>
+                <span className="font-semibold text-emerald-600 dark:text-emerald-400">{formatFileSize(item.afterSize)}</span>
+                {savedBytes > 0 && (
+                  <span className="text-xs font-medium text-emerald-600/80 dark:text-emerald-400/80">
+                    省 {formatFileSize(savedBytes)}
+                  </span>
+                )}
+              </div>
+              {savedPercent > 0 && (
+                <div className="h-1.5 overflow-hidden rounded-full bg-slate-100 dark:bg-white/10">
+                  <div
+                    className="h-full rounded-full bg-emerald-500/80 transition-all duration-700"
+                    style={{ width: `${savedPercent}%` }}
+                  />
+                </div>
+              )}
+            </div>
+          ) : (
+            <p className="mt-2 mb-0 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+              {item.status === 'processing'
+                ? '七牛云端处理中，请稍候…'
+                : item.message || (item.status === 'skipped' ? '未执行压缩' : '处理未完成')}
+            </p>
+          )}
+        </div>
+      </div>
+    </li>
+  );
+}
+
+function CompressConfirmOverlay({
+  count,
+  onCancel,
+  onConfirm,
+}: {
+  count: number;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-1000 flex items-center justify-center p-4">
+      <button type="button" aria-label="关闭" className="absolute inset-0 bg-slate-900/40 backdrop-blur-[2px]" onClick={onCancel} />
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="compress-confirm-title"
+        className="relative w-full max-w-md overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-2xl dark:border-strokedark dark:bg-boxdark"
+      >
+        <div className="border-b border-slate-100 bg-linear-to-br from-primary/5 via-white to-sky-50/50 px-6 py-5 dark:border-strokedark dark:from-primary/10 dark:via-boxdark dark:to-boxdark-2/50">
+          <div className="flex items-start gap-4">
+            <div className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
+              <FiMinimize2 size={20} />
+            </div>
+            <div>
+              <h2 id="compress-confirm-title" className="m-0 text-lg font-semibold text-slate-900 dark:text-white">
+                确认图片瘦身
+              </h2>
+              <p className="mt-1.5 mb-0 text-sm leading-relaxed text-slate-500 dark:text-slate-400">
+                将对 <strong className="font-semibold text-slate-800 dark:text-slate-200">{count}</strong>{' '}
+                张图片自适应压缩，覆盖原文件且链接不变。
+              </p>
+            </div>
+          </div>
+        </div>
+        <div className="px-6 py-4">
+          <p className="m-0 rounded-xl bg-slate-50 px-3.5 py-3 text-xs leading-relaxed text-slate-500 dark:bg-boxdark-2/80 dark:text-slate-400">
+            由七牛云端持久化处理，通常数秒内完成。处理期间请勿关闭进度窗口。
+          </p>
+        </div>
+        <div className="flex gap-3 border-t border-slate-100 px-6 py-4 dark:border-strokedark">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="flex-1 rounded-xl border border-slate-200/80 bg-white px-4 py-2.5 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-50 dark:border-strokedark dark:bg-boxdark-2 dark:text-slate-300 dark:hover:bg-white/5 cursor-pointer"
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            className="flex-1 rounded-xl bg-primary px-4 py-2.5 text-sm font-medium text-white shadow-sm shadow-primary/20 transition-colors hover:bg-primary/90 cursor-pointer"
+          >
+            开始瘦身
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CompressResultOverlay({
+  open,
+  processing,
+  result,
+  progress,
+  onClose,
+}: {
+  open: boolean;
+  processing: boolean;
+  result: FileCompressResult | null;
+  progress: number;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    if (!open || processing) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [open, processing, onClose]);
+
+  if (!open || !result) return null;
+
+  const processingCount = result.items.filter((item) => item.status === 'processing').length;
+  const doneCount = result.items.length - processingCount;
+
+  return (
+    <div className="fixed inset-0 z-1000 flex items-center justify-center p-4">
+      {!processing && (
+        <button type="button" aria-label="关闭" className="absolute inset-0 bg-slate-900/40 backdrop-blur-[2px]" onClick={onClose} />
+      )}
+      {processing && <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-[2px]" aria-hidden />}
+
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="compress-result-title"
+        className="relative flex max-h-[min(640px,90vh)] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-2xl dark:border-strokedark dark:bg-boxdark"
+      >
+        <div className="shrink-0 border-b border-slate-100 bg-linear-to-br from-primary/5 via-white to-emerald-50/30 px-6 py-5 dark:border-strokedark dark:from-primary/10 dark:via-boxdark dark:to-emerald-500/5">
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex items-start gap-4">
+              <div
+                className={`flex size-11 shrink-0 items-center justify-center rounded-xl ${
+                  processing ? 'bg-sky-500/10 text-sky-600' : 'bg-emerald-500/10 text-emerald-600'
+                }`}
+              >
+                {processing ? <FiLoader size={20} className="animate-spin" /> : <FiMinimize2 size={20} />}
+              </div>
+              <div>
+                <h2 id="compress-result-title" className="m-0 text-lg font-semibold text-slate-900 dark:text-white">
+                  {processing ? '正在瘦身' : '瘦身完成'}
+                </h2>
+                <p className="mt-1 mb-0 text-sm text-slate-500 dark:text-slate-400">
+                  {processing
+                    ? `已完成 ${doneCount}/${result.items.length} 张，七牛云端处理中…`
+                    : getCompressSummaryText(result, false)}
+                </p>
+              </div>
+            </div>
+            {!processing && (
+              <button
+                type="button"
+                aria-label="关闭"
+                onClick={onClose}
+                className="flex size-8 shrink-0 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-white/5 dark:hover:text-slate-200 cursor-pointer"
+              >
+                <FiX size={18} />
+              </button>
+            )}
+          </div>
+
+          {!processing && result.totalSavedBytes > 0 && (
+            <div className="mt-4 grid grid-cols-3 gap-2">
+              {[
+                { label: '成功', value: result.successCount, tone: 'text-emerald-600 dark:text-emerald-400' },
+                { label: '跳过', value: result.skippedCount, tone: 'text-amber-600 dark:text-amber-400' },
+                { label: '失败', value: result.failedCount, tone: 'text-red-600 dark:text-red-400' },
+              ].map((stat) => (
+                <div
+                  key={stat.label}
+                  className="rounded-xl border border-slate-200/60 bg-white/80 px-3 py-2 text-center dark:border-strokedark dark:bg-boxdark-2/50"
+                >
+                  <p className={`m-0 text-lg font-semibold tabular-nums ${stat.tone}`}>{stat.value}</p>
+                  <p className="m-0 text-[11px] text-slate-400">{stat.label}</p>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {!processing && result.totalSavedBytes > 0 && (
+            <div className="mt-3 rounded-xl bg-emerald-500/10 px-4 py-3 text-center">
+              <p className="m-0 text-xs text-emerald-700/80 dark:text-emerald-400/80">累计节省空间</p>
+              <p className="m-0 mt-0.5 text-2xl font-bold tabular-nums tracking-tight text-emerald-700 dark:text-emerald-400">
+                {formatFileSize(result.totalSavedBytes)}
+              </p>
+            </div>
+          )}
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
+          {processing && (
+            <div className="mb-4">
+              <CompressProgressBar percent={progress} />
+            </div>
+          )}
+          <ul className="m-0 flex list-none flex-col gap-2.5 p-0">
+            {result.items.map((item) => (
+              <CompressResultItemRow key={item.taskId ?? item.path} item={item} />
+            ))}
+          </ul>
+        </div>
+
+        <div className="shrink-0 border-t border-slate-100 px-6 py-4 dark:border-strokedark">
+          {processing ? (
+            <button
+              type="button"
+              disabled
+              className="flex w-full items-center justify-center gap-2 rounded-xl bg-slate-100 px-4 py-2.5 text-sm font-medium text-slate-400 dark:bg-boxdark-2"
+            >
+              <FiLoader size={16} className="animate-spin" />
+              处理中…
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={onClose}
+              className="w-full rounded-xl bg-primary px-4 py-2.5 text-sm font-medium text-white shadow-sm shadow-primary/20 transition-colors hover:bg-primary/90 cursor-pointer"
+            >
+              完成
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default () => {
+  const [loading, setLoading] = useState(false);
+  const [skeletonLoading, setSkeletonLoading] = useState(true);
+  const [treeData, setTreeData] = useState<FileTreeData | null>(null);
+  const [currentPath, setCurrentPath] = useState('');
+  const [keyword, setKeyword] = useState('');
+  const [uploadOpen, setUploadOpen] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [renameTarget, setRenameTarget] = useState<FileTreeNode | null>(null);
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [fileInfo, setFileInfo] = useState<FileInfo | null>(null);
+  const [createForm] = Form.useForm<{ name: string }>();
+  const [renameForm] = Form.useForm<{ name: string }>();
+  const [selectedFilePaths, setSelectedFilePaths] = useState<string[]>([]);
+  const [viewMode, setViewMode] = useState<EntryViewMode>(() => {
+    try {
+      return localStorage.getItem(FILE_VIEW_STORAGE_KEY) === 'list' ? 'list' : 'grid';
+    } catch {
+      return 'grid';
+    }
+  });
+  const [dirSortField, setDirSortField] = useState<DirSortField>('time');
+  const [dirSortOrder, setDirSortOrder] = useState<'ascend' | 'descend'>('descend');
+  const [fileSortField, setFileSortField] = useState<FileSortField>('time');
+  const [fileSortOrder, setFileSortOrder] = useState<'ascend' | 'descend'>('descend');
+  const [compressProcessing, setCompressProcessing] = useState(false);
+  const [compressResultOpen, setCompressResultOpen] = useState(false);
+  const [compressResult, setCompressResult] = useState<FileCompressResult | null>(null);
+  const [compressConfirmPaths, setCompressConfirmPaths] = useState<string[] | null>(null);
+  const [fileListData, setFileListData] = useState<AppFile[]>([]);
+  const [fileTotal, setFileTotal] = useState(0);
+  const [unfilteredFileCount, setUnfilteredFileCount] = useState(0);
+  const [filePageNum, setFilePageNum] = useState(1);
+  const [filePageSize, setFilePageSize] = useState(DEFAULT_FILE_PAGE_SIZE);
+  const [filesLoading, setFilesLoading] = useState(false);
+
+  const compressProgress = useMemo(() => {
+    if (!compressResult?.items.length) return 0;
+    const pending = compressResult.items.filter((item) => item.status === 'processing').length;
+    return Math.round(((compressResult.items.length - pending) / compressResult.items.length) * 100);
+  }, [compressResult]);
+
+  const rootPath = useMemo(() => inferRootPathFromTree(treeData), [treeData]);
+
+  const normalizePath = (path: string) => normalizePathForRoot(path, rootPath);
+  const trimSlash = (path: string) => normalizePathForRoot(path, rootPath).replace(/\/$/, '');
+
+  const findNode = (list: FileTreeNode[], targetPath: string): FileTreeNode | null =>
+    findNodeInTree(list, targetPath, rootPath);
+
+  const fetchFiles = useCallback(
+    async (overridePath?: string) => {
+      const dir = trimSlash(overridePath ?? currentPath);
+      if (!dir) {
+        setFileListData([]);
+        setFileTotal(0);
+        setUnfilteredFileCount(0);
+        return;
+      }
+
+      const search = keyword.trim().toLowerCase();
+      const needsFullList = !!search || fileSortField !== 'time' || fileSortOrder !== 'descend';
+
+      setFilesLoading(true);
+      try {
+        if (needsFullList) {
+          const { data } = await getFileListAPI(dir);
+          const all = data.result.map(mapListItemToFile);
+          setUnfilteredFileCount(all.length);
+          let list = search ? all.filter((f) => f.name.toLowerCase().includes(search)) : all;
+          list = sortFiles(list, fileSortField, fileSortOrder);
+          setFileTotal(list.length);
+          const start = (filePageNum - 1) * filePageSize;
+          setFileListData(list.slice(start, start + filePageSize));
+        } else {
+          const { data } = await getFileListAPI(dir, { pageNum: filePageNum, pageSize: filePageSize });
+          const list = data.result.map(mapListItemToFile);
+          if (list.length === 0 && filePageNum > 1 && data.total > 0) {
+            setFilePageNum(Math.max(1, Math.ceil(data.total / filePageSize)));
+            return;
+          }
+          setFileListData(list);
+          setFileTotal(data.total);
+          setUnfilteredFileCount(data.total);
+        }
+      } catch (error) {
+        console.error(error);
+      } finally {
+        setFilesLoading(false);
+      }
+    },
+    [currentPath, filePageNum, filePageSize, keyword, fileSortField, fileSortOrder],
+  );
+
+  /** 仅请求接口拉取整棵树；目录点击、面包屑、返回上一级不调用 */
+  const fetchTree = async (keepPath?: string) => {
+    try {
+      setLoading(true);
+      const { data } = await getFileTreeAPI();
+      setTreeData(data);
+
+      const rp = inferRootPathFromTree(data);
+      const targetPath = keepPath !== undefined ? normalizePathForRoot(keepPath, rp) : rp;
+      const exists =
+        rp === ''
+          ? targetPath === '' || !!findNodeInTree(data.result, targetPath, '')
+          : !targetPath || targetPath === rp || !!findNodeInTree(data.result, targetPath, rp);
+      setCurrentPath(exists ? targetPath : rp === '' ? '' : rp);
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setSkeletonLoading(false);
+      setLoading(false);
+    }
+  };
+
+  const refreshCurrentDir = async (keepPath?: string) => {
+    await fetchTree(keepPath);
+  };
+
+  const navigateTo = (path: string) => {
+    if (!treeData) return;
+    const targetPath = normalizePath(path);
+    setKeyword('');
+    setFilePageNum(1);
+    if (!rootPath) {
+      const exists = targetPath === '' || !!findNode(treeData.result, targetPath);
+      setCurrentPath(exists ? targetPath : '');
+      return;
+    }
+    const exists = targetPath === rootPath || !!findNode(treeData.result, targetPath);
+    setCurrentPath(exists ? targetPath : rootPath);
+  };
+
+  useEffect(() => {
+    fetchTree();
+  }, []);
+
+  useEffect(() => {
+    if (!treeData) return;
+    void fetchFiles();
+  }, [treeData, fetchFiles]);
+
+  useEffect(() => {
+    setFilePageNum(1);
+  }, [currentPath, keyword, fileSortField, fileSortOrder]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(FILE_VIEW_STORAGE_KEY, viewMode);
+    } catch {
+      /* ignore */
+    }
+  }, [viewMode]);
+
+  const rootNode = useMemo(() => {
+    if (!treeData || !rootPath) return null;
+    return treeData.result.find((node) => normalizePathForRoot(node.path, rootPath) === rootPath) || null;
+  }, [treeData, rootPath]);
+
+  const currentNode = useMemo(() => {
+    if (!treeData) return null;
+    // 多根：虚拟根层展示全部 result 作为一级目录
+    if (!rootPath) {
+      if (currentPath === '') {
+        return {
+          type: 'dir' as const,
+          name: 'root',
+          path: '',
+          children: treeData.result,
+          files: [],
+          fileCount: treeData.total,
+          totalSize: 0,
+        };
+      }
+      return findNodeInTree(treeData.result, currentPath, '');
+    }
+    if (currentPath === rootPath) {
+      if (rootNode) return rootNode;
+      return {
+        type: 'dir' as const,
+        name: rootPath.replace(/\/$/, '') || 'root',
+        path: rootPath,
+        children: treeData.result,
+        files: [],
+        fileCount: treeData.total,
+        totalSize: 0,
+      };
+    }
+    return findNodeInTree(treeData.result, currentPath, rootPath);
+  }, [treeData, currentPath, rootNode, rootPath]);
+
+  const dirList = useMemo(() => {
+    const list = currentNode?.children || [];
+    if (!keyword.trim()) return list;
+    return list.filter((item) => item.name.toLowerCase().includes(keyword.toLowerCase()));
+  }, [currentNode, keyword]);
+
+  const fileList = fileListData;
+
+  const rawDirList = currentNode?.children ?? [];
+  const hasFilteredEntries = dirList.length > 0 || fileTotal > 0;
+  const isSearchActive = !!keyword.trim();
+  const isSearchEmpty = isSearchActive && fileList.length === 0 && unfilteredFileCount > 0;
+
+  const sortedDirList = useMemo(() => sortDirNodes(dirList, dirSortField, dirSortOrder), [dirList, dirSortField, dirSortOrder]);
+
+  const dirTableRows = useMemo<DirTableRow[]>(
+    () =>
+      sortedDirList.map((dir) => {
+        const { children, ...rest } = dir;
+        return { ...rest, subDirCount: children.length };
+      }),
+    [sortedDirList],
+  );
+
+  const allFileSelected = useMemo(
+    () => fileList.length > 0 && fileList.every((f) => selectedFilePaths.includes(f.path)),
+    [fileList, selectedFilePaths],
+  );
+  const someFileSelected = useMemo(
+    () => fileList.some((f) => selectedFilePaths.includes(f.path)),
+    [fileList, selectedFilePaths],
+  );
+
+  useEffect(() => {
+    const allowed = new Set(fileList.map((f) => f.path));
+    setSelectedFilePaths((prev) => prev.filter((p) => allowed.has(p)));
+  }, [fileList]);
+
+  const breadcrumbs = useMemo(() => {
+    const trimmed = trimSlash(currentPath);
+    if (!trimmed) {
+      if (!rootPath) return [{ label: '根目录', path: '' }];
+      return [{ label: rootPath.replace(/\/$/, '') || 'root', path: rootPath }];
+    }
+    const parts = trimmed.split('/');
+    const items: { label: string; path: string }[] = [];
+    if (!rootPath) {
+      items.push({ label: '根目录', path: '' });
+    }
+    parts.forEach((_, index) => {
+      const path = normalizePath(parts.slice(0, index + 1).join('/'));
+      items.push({ label: parts[index], path });
+    });
+    return items;
+  }, [currentPath, rootPath]);
+
+  const goBack = () => {
+    if (!treeData) return;
+    if (!rootPath) {
+      if (currentPath === '') return;
+      const cleaned = trimSlash(currentPath);
+      const parts = cleaned.split('/');
+      if (parts.length <= 1) {
+        setCurrentPath('');
+        return;
+      }
+      navigateTo(normalizePath(parts.slice(0, -1).join('/')));
+      return;
+    }
+    if (currentPath === rootPath) return;
+    const parentPath = normalizePath(currentPath.split('/').slice(0, -2).join('/'));
+    navigateTo(parentPath || rootPath);
+  };
+
+  const atMultiRootHome = !rootPath && currentPath === '';
+
+  const onCreateDir = async () => {
+    try {
+      const { name } = await createForm.validateFields();
+      const dir = `${trimSlash(currentPath)}/${name.trim()}`;
+      await createDirAPI({ dir });
+      message.success('🎉 新建目录成功');
+      setCreateOpen(false);
+      createForm.resetFields();
+      await refreshCurrentDir(currentPath);
+    } catch (error) {
+      console.error(error);
+    }
+  };
+
+  const openRenameDir = (target: FileTreeNode) => {
+    setRenameTarget(target);
+    renameForm.setFieldValue('name', target.name);
+    setRenameOpen(true);
+  };
+
+  const onRenameDir = async () => {
+    if (!renameTarget) return;
+    try {
+      const { name } = await renameForm.validateFields();
+      const parentDir = renameTarget.path.split('/').slice(0, -2).join('/');
+      const toDir = `${parentDir}/${name.trim()}`.replace(/^\/+/, '');
+      await renameDirAPI({
+        fromDir: trimSlash(renameTarget.path),
+        toDir,
+      });
+      message.success('🎉 目录重命名成功');
+      setRenameOpen(false);
+      setRenameTarget(null);
+      renameForm.resetFields();
+      await refreshCurrentDir(currentPath);
+    } catch (error) {
+      console.error(error);
+    }
+  };
+
+  const onDeleteDir = async (dirPath: string) => {
+    try {
+      await deleteDirAPI(trimSlash(dirPath));
+      message.success('🎉 删除目录成功');
+      await refreshCurrentDir(currentPath);
+    } catch (error) {
+      console.error(error);
+    }
+  };
+
+  const onDeleteFile = async (filePath: string) => {
+    try {
+      await delFileDataAPI(filePath);
+      message.success('🎉 删除文件成功');
+      setSelectedFilePaths((prev) => prev.filter((p) => p !== filePath));
+      await refreshCurrentDir(currentPath);
+    } catch (error) {
+      console.error(error);
+    }
+  };
+
+  const onBatchDeleteFiles = async () => {
+    if (selectedFilePaths.length === 0) return;
+    try {
+      await batchDelFileDataAPI(selectedFilePaths);
+      message.success('🎉 批量删除成功');
+      setSelectedFilePaths([]);
+      await refreshCurrentDir(currentPath);
+    } catch (error) {
+      console.error(error);
+    }
+  };
+
+  const onCompressFiles = async (paths: string[]) => {
+    if (paths.length === 0) return;
+    try {
+      setCompressProcessing(true);
+      setCompressResult(null);
+      setCompressResultOpen(true);
+      const { data } = await compressFileDataAPI(paths);
+      let items = [...data.items];
+      setCompressResult(summarizeCompressResult(items));
+
+      while (true) {
+        const pendingIds = items
+          .filter((item) => item.taskId && item.status === 'processing')
+          .map((item) => item.taskId as string);
+        if (pendingIds.length === 0) break;
+        await sleep(2000);
+        const { data: polled } = await queryCompressTasksAPI(pendingIds);
+        const polledMap = new Map(polled.map((item) => [item.taskId, item]));
+        items = items.map((item) => (item.taskId && polledMap.has(item.taskId) ? polledMap.get(item.taskId)! : item));
+        setCompressResult(summarizeCompressResult(items));
+      }
+
+      const finalResult = summarizeCompressResult(items);
+      setCompressResult(finalResult);
+
+      if (finalResult.successCount > 0) {
+        await refreshCurrentDir(currentPath);
+      }
+    } catch (error) {
+      console.error(error);
+      setCompressResultOpen(false);
+    } finally {
+      setCompressProcessing(false);
+    }
+  };
+
+  const confirmCompressFiles = (paths: string[]) => {
+    setCompressConfirmPaths(paths);
+  };
+
+  const handleConfirmCompress = () => {
+    if (!compressConfirmPaths?.length) return;
+    const paths = compressConfirmPaths;
+    setCompressConfirmPaths(null);
+    void onCompressFiles(paths);
+  };
+
+  const onOpenFileDetail = async (filePath: string) => {
+    try {
+      setDetailLoading(true);
+      setDetailOpen(true);
+      const { data } = await getFileDataAPI(filePath);
+      setFileInfo(data);
+    } catch (error) {
+      console.error(error);
+      setDetailOpen(false);
+    } finally {
+      setDetailLoading(false);
+    }
+  };
+
+  const canGoBack =
+    (!rootPath && currentPath !== '') || (Boolean(rootPath) && currentPath !== rootPath);
+
+  if (skeletonLoading) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col">
+        <Skeleton />
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col text-slate-600 dark:text-slate-300">
+      <Title value="文件管理">
+        <div className="flex flex-wrap items-center gap-2">
+          <Button icon={<FiRotateCcw />} onClick={() => void refreshCurrentDir(currentPath)}>
+            刷新
+          </Button>
+          <Button icon={<FiFolderPlus />} disabled={atMultiRootHome} onClick={() => setCreateOpen(true)}>
+            新建目录
+          </Button>
+          <Button
+            type="primary"
+            icon={<FiUploadCloud />}
+            disabled={atMultiRootHome}
+            onClick={() => setUploadOpen(true)}
+          >
+            上传文件
+          </Button>
+        </div>
+      </Title>
+
+      <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-slate-200/80 bg-white dark:border-strokedark dark:bg-boxdark">
+        <header className="shrink-0 border-b border-slate-100 px-3 py-2.5 sm:px-4 sm:py-3 dark:border-strokedark">
+          <div className="flex min-w-0 items-center gap-2 sm:gap-3">
+            <button
+              type="button"
+              aria-label="返回上一级"
+              disabled={!canGoBack}
+              onClick={goBack}
+              className={`flex size-9 shrink-0 items-center justify-center rounded-lg border transition-colors cursor-pointer ${canGoBack
+                ? 'border-slate-200/80 bg-slate-50 text-slate-600 hover:border-slate-300 hover:bg-slate-100 dark:border-strokedark dark:bg-boxdark-2 dark:text-slate-300 dark:hover:bg-white/5'
+                : 'cursor-not-allowed border-transparent bg-slate-50/60 text-slate-300 dark:bg-boxdark-2/50 dark:text-slate-600'
+                }`}
+            >
+              <FiArrowLeft size={18} />
+            </button>
+
+            <nav
+              className="min-w-0 flex-1 overflow-x-auto rounded-lg border border-slate-200/60 bg-slate-50/80 px-3 py-2 dark:border-strokedark dark:bg-boxdark-2/80"
+              aria-label="当前路径"
+            >
+              <ol className="flex min-w-max flex-wrap items-center gap-1 text-sm">
+                {breadcrumbs.map((item, index) => {
+                  const isCurrent = index === breadcrumbs.length - 1;
+                  return (
+                    <li key={`${index}-${item.path}`} className="flex items-center gap-1">
+                      {index > 0 && (
+                        <FiChevronRight className="shrink-0 text-slate-300 dark:text-slate-600" size={14} aria-hidden />
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => !isCurrent && navigateTo(item.path)}
+                        className={`max-w-48 truncate rounded px-0.5 transition-colors ${isCurrent
+                          ? 'cursor-default font-semibold text-primary'
+                          : 'cursor-pointer text-slate-500 hover:text-primary dark:text-slate-400'
+                          }`}
+                      >
+                        {item.label}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ol>
+            </nav>
+          </div>
+        </header>
+
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-3 sm:p-4">
+          <Spin
+            spinning={loading}
+            className="flex min-h-0 flex-1 flex-col [&_.ant-spin-container]:flex [&_.ant-spin-container]:min-h-0 [&_.ant-spin-container]:flex-1 [&_.ant-spin-container]:flex-col"
+          >
+            <div className="flex min-h-0 flex-1 flex-col">
+              <div className="mb-4 flex shrink-0 flex-col gap-2 rounded-xl border border-slate-200/70 bg-slate-50/50 px-3 py-2.5 dark:border-strokedark dark:bg-boxdark-2/40 sm:px-4 lg:flex-row lg:items-center lg:justify-between">
+                <div className="flex flex-wrap items-center gap-2">
+                  {fileTotal > 0 && viewMode === 'grid' && (
+                    <Checkbox
+                      className="shrink-0"
+                      checked={allFileSelected}
+                      indeterminate={someFileSelected && !allFileSelected}
+                      onChange={(e) => {
+                        if (e.target.checked) {
+                          setSelectedFilePaths(fileList.map((f) => f.path));
+                        } else {
+                          setSelectedFilePaths([]);
+                        }
+                      }}
+                    >
+                      全选文件
+                    </Checkbox>
+                  )}
+
+                  {selectedFilePaths.length > 0 && (
+                    <>
+                      <Button
+                        icon={<FiMinimize2 />}
+                        disabled={compressProcessing}
+                        onClick={() => confirmCompressFiles(selectedFilePaths)}
+                      >
+                        批量瘦身 ({selectedFilePaths.length})
+                      </Button>
+                      <Popconfirm
+                        title={`确定删除选中的 ${selectedFilePaths.length} 个文件吗？`}
+                        okText="确定"
+                        cancelText="取消"
+                        onConfirm={onBatchDeleteFiles}
+                      >
+                        <Button type="primary" danger icon={<FiTrash2 />}>
+                          批量删除 ({selectedFilePaths.length})
+                        </Button>
+                      </Popconfirm>
+                    </>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 lg:justify-end">
+                  <ViewModeToggle value={viewMode} onChange={setViewMode} />
+
+                  {rawDirList.length > 0 && (
+                    <>
+                      <span className="hidden h-4 w-px shrink-0 bg-slate-200 sm:block dark:bg-strokedark" aria-hidden />
+                      <div className="flex items-center gap-2">
+                        <span className="shrink-0 text-xs text-slate-400 dark:text-slate-500">目录</span>
+                        <Select<DirSortField>
+                          className="min-w-22"
+                          value={dirSortField}
+                          options={DIR_SORT_FIELD_OPTIONS}
+                          onChange={setDirSortField}
+                        />
+                        <Segmented<'ascend' | 'descend'>
+                          value={dirSortOrder}
+                          onChange={setDirSortOrder}
+                          options={[
+                            { label: '升序', value: 'ascend' },
+                            { label: '降序', value: 'descend' },
+                          ]}
+                        />
+                      </div>
+                    </>
+                  )}
+
+                  {unfilteredFileCount > 0 && (
+                    <>
+                      <span className="hidden h-4 w-px shrink-0 bg-slate-200 sm:block dark:bg-strokedark" aria-hidden />
+                      <div className="flex items-center gap-2">
+                        <span className="shrink-0 text-xs text-slate-400 dark:text-slate-500">文件</span>
+                        <Select<FileSortField>
+                          className="min-w-22"
+                          value={fileSortField}
+                          options={FILE_SORT_FIELD_OPTIONS}
+                          onChange={setFileSortField}
+                        />
+                        <Segmented<'ascend' | 'descend'>
+                          value={fileSortOrder}
+                          onChange={setFileSortOrder}
+                          options={[
+                            { label: '升序', value: 'ascend' },
+                            { label: '降序', value: 'descend' },
+                          ]}
+                        />
+                      </div>
+                    </>
+                  )}
+
+                  <Input
+                    allowClear
+                    prefix={<FiSearch className="text-slate-400" size={15} />}
+                    placeholder="搜索当前目录"
+                    className="w-full sm:w-52!"
+                    value={keyword}
+                    onChange={(e) => setKeyword(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              {!hasFilteredEntries ? (
+                <div className="flex min-h-[320px] flex-1 items-center justify-center rounded-xl border border-dashed border-slate-200 bg-slate-50/50 dark:border-strokedark dark:bg-boxdark-2/30">
+                  {isSearchEmpty ? (
+                    <Empty description={`未找到匹配「${keyword.trim()}」的内容`}>
+                      <Button type="primary" onClick={() => setKeyword('')}>
+                        清除搜索
+                      </Button>
+                    </Empty>
+                  ) : (
+                    <Empty description="当前目录暂无内容" />
+                  )}
+                </div>
+              ) : (
+                <div className="min-h-0 flex-1 overflow-y-auto">
+
+                  {dirList.length > 0 && (
+                    <section>
+                      <SectionHeading title="目录" count={dirList.length} />
+                      {viewMode === 'list' ? (
+                        <Table<DirTableRow>
+                          rowKey="path"
+                          pagination={false}
+                          scroll={{ x: 'max-content' }}
+                          className="[&_.ant-table-cell]:align-middle"
+                          dataSource={dirTableRows}
+                          columns={
+                            [
+                              {
+                                title: '名称',
+                                dataIndex: 'name',
+                                ellipsis: true,
+                                render: (_, row) => (
+                                  <button
+                                    type="button"
+                                    className="max-w-full cursor-pointer border-0 bg-transparent p-0 text-left font-medium text-primary hover:underline"
+                                    onClick={() => navigateTo(row.path)}
+                                  >
+                                    {row.name}
+                                  </button>
+                                ),
+                              },
+                              {
+                                title: '子目录',
+                                width: 88,
+                                align: 'center',
+                                render: (_, row) => (
+                                  <span className="tabular-nums text-slate-600 dark:text-slate-300">{row.subDirCount}</span>
+                                ),
+                              },
+                              {
+                                title: '文件数',
+                                width: 88,
+                                align: 'center',
+                                render: (_, row) => (
+                                  <span className="tabular-nums text-slate-600 dark:text-slate-300">{row.fileCount}</span>
+                                ),
+                              },
+                              {
+                                title: '大小',
+                                width: 104,
+                                align: 'right',
+                                render: (_, row) => (
+                                  <span className="tabular-nums text-slate-600 dark:text-slate-300">
+                                    {formatFileSize(row.totalSize)}
+                                  </span>
+                                ),
+                              },
+                              {
+                                title: '操作',
+                                key: 'actions',
+                                width: 96,
+                                align: 'center',
+                                render: (_, row) => {
+                                  const node = sortedDirList.find((d) => d.path === row.path);
+                                  return (
+                                    <div className="flex items-center justify-center gap-0.5">
+                                      <TableIconButton
+                                        label="重命名目录"
+                                        disabled={!node}
+                                        onClick={() => node && openRenameDir(node)}
+                                      >
+                                        <FiEdit2 size={16} />
+                                      </TableIconButton>
+                                      <TableIconButton
+                                        label="删除目录"
+                                        danger
+                                        confirm={{
+                                          title: '确定删除该目录吗？',
+                                          onConfirm: () => onDeleteDir(row.path),
+                                        }}
+                                      >
+                                        <FiTrash2 size={16} />
+                                      </TableIconButton>
+                                    </div>
+                                  );
+                                },
+                              },
+                            ] as ColumnsType<DirTableRow>
+                          }
+                        />
+                      ) : (
+                        <div className="grid grid-cols-[repeat(auto-fill,minmax(150px,1fr))] gap-3">
+                          {sortedDirList.map((dir) => (
+                            <div
+                              key={dir.path}
+                              className="group flex flex-col rounded-xl border border-slate-200/80 bg-slate-50/50 px-2 pb-2 pt-3 transition-colors hover:border-primary/30 hover:bg-primary/5 dark:border-strokedark dark:bg-boxdark-2/50 dark:hover:border-primary/35"
+                            >
+                              <button
+                                type="button"
+                                className="cursor-pointer text-center"
+                                onClick={() => navigateTo(dir.path)}
+                              >
+                                <img src={fileSvg} alt="" className="mx-auto mb-2 h-12 w-14 object-contain" />
+                                <Tooltip title={dir.name}>
+                                  <p className="m-0 line-clamp-2 text-xs font-medium leading-snug text-slate-700 group-hover:text-primary dark:text-slate-200">
+                                    {dir.name}
+                                  </p>
+                                </Tooltip>
+                                <p className="mt-1 text-[10px] tabular-nums text-slate-400 dark:text-slate-500">
+                                  {dir.fileCount} 个文件
+                                </p>
+                              </button>
+                              <div className="mt-2 flex justify-center gap-0.5 border-t border-slate-200/60 pt-2 dark:border-strokedark">
+                                <TableIconButton label="重命名目录" onClick={() => openRenameDir(dir)}>
+                                  <FiEdit2 size={14} />
+                                </TableIconButton>
+                                <TableIconButton
+                                  label="删除目录"
+                                  danger
+                                  confirm={{
+                                    title: '确定删除该目录吗？',
+                                    onConfirm: () => onDeleteDir(dir.path),
+                                  }}
+                                >
+                                  <FiTrash2 size={14} />
+                                </TableIconButton>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </section>
+                  )}
+
+                  {fileTotal > 0 && (
+                    <section className={dirList.length > 0 ? 'mt-6 border-t border-slate-100 pt-5 dark:border-strokedark' : ''}>
+                      <SectionHeading title="文件" count={fileTotal} />
+                      <Spin spinning={filesLoading}>
+                      <Image.PreviewGroup>
+                        {viewMode === 'list' ? (
+                          <Table<AppFile>
+                            rowKey="path"
+                            pagination={false}
+                            scroll={{ x: 'max-content' }}
+                            className="[&_.ant-table-cell]:align-middle"
+                            dataSource={fileList}
+                            rowSelection={{
+                              selectedRowKeys: selectedFilePaths,
+                              onChange: (keys) => setSelectedFilePaths(keys as string[]),
+                              columnWidth: 40,
+                            }}
+                            columns={
+                              [
+                                {
+                                  title: '预览',
+                                  key: 'thumb',
+                                  width: 88,
+                                  render: (_, file) => (
+                                    <div className="relative size-14 overflow-hidden rounded-lg bg-slate-100 dark:bg-boxdark-2">
+                                      <Image
+                                        src={file.url}
+                                        fallback={errorImg}
+                                        alt={file.name}
+                                        loading="lazy"
+                                        preview={{ alt: file.name }}
+                                        rootClassName="absolute inset-0 block size-full"
+                                        className="size-full h-[inherit]! object-cover"
+                                      />
+                                    </div>
+                                  ),
+                                },
+                                {
+                                  title: '名称',
+                                  dataIndex: 'name',
+                                  ellipsis: true,
+                                  render: (name: string) => (
+                                    <Tooltip title={name} placement="topLeft">
+                                      <span className="font-medium text-slate-800 dark:text-slate-100">{name}</span>
+                                    </Tooltip>
+                                  ),
+                                },
+                                {
+                                  title: '大小',
+                                  width: 108,
+                                  align: 'right',
+                                  render: (_, file) => (
+                                    <span className="tabular-nums text-slate-600 dark:text-slate-300">
+                                      {formatFileSize(file.size)}
+                                    </span>
+                                  ),
+                                },
+                                {
+                                  title: '类型',
+                                  width: 88,
+                                  ellipsis: true,
+                                  render: (_, file) => (
+                                    <span className="inline-flex rounded-md border border-slate-200/80 bg-slate-50 px-1.5 py-0.5 font-mono text-[11px] uppercase text-slate-500 dark:border-strokedark dark:bg-boxdark-2 dark:text-slate-400">
+                                      {getFileTypeLabel(file)}
+                                    </span>
+                                  ),
+                                },
+                                {
+                                  title: '操作',
+                                  key: 'actions',
+                                  width: 128,
+                                  align: 'center',
+                                  render: (_, file) => (
+                                    <div className="flex items-center justify-center gap-0.5">
+                                      <TableIconButton label="查看详情" onClick={() => onOpenFileDetail(file.path)}>
+                                        <FiEye size={16} />
+                                      </TableIconButton>
+                                      <TableIconButton
+                                        label="图片瘦身"
+                                        disabled={compressProcessing}
+                                        onClick={() => confirmCompressFiles([file.path])}
+                                      >
+                                        <FiMinimize2 size={16} />
+                                      </TableIconButton>
+                                      <TableIconButton
+                                        label="删除文件"
+                                        danger
+                                        confirm={{
+                                          title: '确定删除该文件吗？',
+                                          onConfirm: () => onDeleteFile(file.path),
+                                        }}
+                                      >
+                                        <FiTrash2 size={16} />
+                                      </TableIconButton>
+                                    </div>
+                                  ),
+                                },
+                              ] as ColumnsType<AppFile>
+                            }
+                          />
+                        ) : (
+                          <div className="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-4">
+                            {fileList.map((file) => {
+                              const selected = selectedFilePaths.includes(file.path);
+                              return (
+                                <article
+                                  key={file.path}
+                                  className={`group flex flex-col overflow-hidden rounded-xl border bg-white transition-colors dark:bg-boxdark-2/30 ${selected
+                                    ? 'border-primary/40 ring-1 ring-primary/15'
+                                    : 'border-slate-200/80 hover:border-primary/30 dark:border-strokedark'
+                                    }`}
+                                >
+                                  <div className="relative aspect-4/3 w-full shrink-0 overflow-hidden bg-slate-100 dark:bg-boxdark-2">
+                                    <div className="absolute left-2 top-2 z-10" onClick={(e) => e.stopPropagation()}>
+                                      <Checkbox
+                                        checked={selected}
+                                        onChange={(e) => {
+                                          const checked = e.target.checked;
+                                          setSelectedFilePaths((prev) =>
+                                            checked ? [...prev, file.path] : prev.filter((p) => p !== file.path),
+                                          );
+                                        }}
+                                      />
+                                    </div>
+                                    <Image
+                                      src={file.url}
+                                      fallback={errorImg}
+                                      alt={file.name}
+                                      loading="lazy"
+                                      preview={{ alt: file.name }}
+                                      rootClassName="absolute inset-0 block size-full"
+                                      className="size-full h-[inherit]! cursor-zoom-in object-cover"
+                                    />
+                                  </div>
+                                  <button
+                                    type="button"
+                                    className="min-h-[52px] flex-1 px-3 pb-1 pt-2.5 text-left cursor-pointer"
+                                    onClick={() => {
+                                      setSelectedFilePaths((prev) =>
+                                        selected ? prev.filter((p) => p !== file.path) : [...prev, file.path],
+                                      );
+                                    }}
+                                  >
+                                    <Tooltip title={file.name} placement="topLeft">
+                                      <p className="mb-1 line-clamp-2 text-xs font-medium leading-snug text-slate-800 group-hover:text-primary dark:text-slate-100">
+                                        {file.name}
+                                      </p>
+                                    </Tooltip>
+                                    <p className="m-0 text-[11px] tabular-nums text-slate-400 dark:text-slate-500">
+                                      {formatFileSize(file.size)}
+                                    </p>
+                                  </button>
+                                  <div className="flex justify-end gap-0.5 border-t border-slate-100 px-2 py-1.5 dark:border-strokedark">
+                                    <TableIconButton label="查看详情" onClick={() => onOpenFileDetail(file.path)}>
+                                      <FiEye size={14} />
+                                    </TableIconButton>
+                                    <TableIconButton
+                                      label="图片瘦身"
+                                      disabled={compressProcessing}
+                                      onClick={() => confirmCompressFiles([file.path])}
+                                    >
+                                      <FiMinimize2 size={14} />
+                                    </TableIconButton>
+                                    <TableIconButton
+                                      label="删除文件"
+                                      danger
+                                      confirm={{
+                                        title: '确定删除该文件吗？',
+                                        onConfirm: () => onDeleteFile(file.path),
+                                      }}
+                                    >
+                                      <FiTrash2 size={14} />
+                                    </TableIconButton>
+                                  </div>
+                                </article>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </Image.PreviewGroup>
+                      {fileTotal > 0 && (
+                        <div className="mt-4 flex justify-end">
+                          <Pagination
+                            current={filePageNum}
+                            pageSize={filePageSize}
+                            total={fileTotal}
+                            showSizeChanger
+                            pageSizeOptions={[12, 24, 48, 96]}
+                            showTotal={(totalCount) => {
+                              const totalPages = Math.max(1, Math.ceil(totalCount / filePageSize));
+                              return (
+                                <span className="text-xs text-slate-500 dark:text-slate-400">
+                                  第 {filePageNum} / {totalPages} 页 · 共 {totalCount} 个文件
+                                </span>
+                              );
+                            }}
+                            onChange={(page, size) => {
+                              setFilePageNum(size !== filePageSize ? 1 : page);
+                              setFilePageSize(size);
+                            }}
+                          />
+                        </div>
+                      )}
+                      </Spin>
+                    </section>
+                  )}
+                </div>
+              )}
+            </div>
+          </Spin>
+        </div>
+      </section>
+
+      <FileUpload
+        multiple
+        dir={trimSlash(currentPath)}
+        open={uploadOpen}
+        onCancel={() => setUploadOpen(false)}
+        onSuccess={() => {
+          setUploadOpen(false);
+          void refreshCurrentDir(currentPath);
+        }}
+      />
+
+      <Modal title="新建目录" open={createOpen} onOk={onCreateDir} onCancel={() => setCreateOpen(false)} destroyOnHidden>
+        <Form form={createForm} layout="vertical">
+          <Form.Item
+            name="name"
+            rules={[
+              { required: true, message: '请输入目录名称' },
+              { pattern: /^[^/\\]+$/, message: '目录名不能包含 / 或 \\' },
+            ]}
+          >
+            <Input placeholder="例如：article" maxLength={64} />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal title="重命名目录" open={renameOpen} onOk={onRenameDir} onCancel={() => setRenameOpen(false)} destroyOnHidden>
+        <Form form={renameForm} layout="vertical">
+          <Form.Item
+            label="目录名称"
+            name="name"
+            rules={[
+              { required: true, message: '请输入目录名称' },
+              { pattern: /^[^/\\]+$/, message: '目录名不能包含 / 或 \\' },
+            ]}
+          >
+            <Input placeholder="请输入新目录名" maxLength={64} />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal title="文件详情" open={detailOpen} onCancel={() => setDetailOpen(false)} footer={null} destroyOnHidden>
+        <Spin spinning={detailLoading}>
+          {fileInfo && (
+            <div className="overflow-hidden rounded-xl border border-slate-200/80 dark:border-strokedark">
+              <dl className="divide-y divide-slate-100 dark:divide-strokedark">
+                {(
+                  [
+                    ['名称', fileInfo.name, 'text-sm text-slate-800 dark:text-slate-100'],
+                    ['路径', fileInfo.path, 'font-mono text-xs break-all text-slate-600 dark:text-slate-300'],
+                    ['类型', fileInfo.mimeType, 'font-mono text-xs text-slate-600 dark:text-slate-300'],
+                    ['大小', formatFileSize(fileInfo.size), 'text-sm tabular-nums text-slate-800 dark:text-slate-100'],
+                    [
+                      '上传时间',
+                      dayjs(fileInfo.putTime).format('YYYY-MM-DD HH:mm:ss'),
+                      'text-sm tabular-nums text-slate-800 dark:text-slate-100',
+                    ],
+                  ] as const
+                ).map(([label, value, valueClass]) => (
+                  <div
+                    key={label}
+                    className="grid gap-1 bg-slate-50/50 px-4 py-3 sm:grid-cols-[5.5rem_1fr] sm:items-baseline sm:gap-x-4 dark:bg-boxdark-2/30"
+                  >
+                    <dt className="text-xs font-medium text-slate-400 dark:text-slate-500">{label}</dt>
+                    <dd className={`min-w-0 leading-relaxed ${valueClass}`}>{value}</dd>
+                  </div>
+                ))}
+                <div className="grid gap-1 bg-slate-50/50 px-4 py-3 sm:grid-cols-[5.5rem_1fr] sm:items-baseline sm:gap-x-4 dark:bg-boxdark-2/30">
+                  <dt className="text-xs font-medium text-slate-400 dark:text-slate-500">链接</dt>
+                  <dd className="min-w-0 text-sm">
+                    <a
+                      href={fileInfo.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-primary break-all underline-offset-2 hover:underline"
+                    >
+                      {fileInfo.url}
+                    </a>
+                  </dd>
+                </div>
+              </dl>
+            </div>
+          )}
+        </Spin>
+      </Modal>
+
+      {compressConfirmPaths && (
+        <CompressConfirmOverlay
+          count={compressConfirmPaths.length}
+          onCancel={() => setCompressConfirmPaths(null)}
+          onConfirm={handleConfirmCompress}
+        />
+      )}
+
+      <CompressResultOverlay
+        open={compressResultOpen}
+        processing={compressProcessing}
+        result={compressResult}
+        progress={compressProgress}
+        onClose={() => setCompressResultOpen(false)}
+      />
+    </div>
+  );
+};

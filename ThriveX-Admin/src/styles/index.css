@@ -1,0 +1,108 @@
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/preflight.css" layer(custom-base);
+@import "tailwindcss/utilities.css" layer(custom-utilities);
+@import url("./custom.scss") layer(custom-base);
+
+@layer theme, custom-base, custom-utilities;
+
+@source './custom.scss';
+
+@custom-variant dark (&:is(.dark *));
+
+@theme {
+  --breakpoint-xs: 480px;
+  --color-stroke: #e2e8f0;
+  --color-black: #1c2434;
+  --color-black-2: #010101;
+  --color-primary: #60a5fa;
+  --color-boxdark: #334459;
+  --color-boxdark-2: #263444;
+  --color-strokedark: #475f7d;
+
+  --shadow-default: 0px 8px 13px -3px rgba(0, 0, 0, 0.07);
+
+  --background-image-light-gradient:
+    radial-gradient(
+      at 13.814868431089122% 36.55432836575234%,
+      hsla(33.33333333333323, 100%, 98.23529411764707%, 1) 0%,
+      hsla(33.33333333333323, 100%, 98.23529411764707%, 0) 100%
+    ),
+    radial-gradient(
+      at 26.757512289394448% 14.55716430928402%,
+      hsla(201.99999999999997, 100%, 94.11764705882352%, 1) 0%,
+      hsla(201.99999999999997, 100%, 94.11764705882352%, 0) 100%
+    ),
+    radial-gradient(
+      at 71.81123062379334% 73.35997062171711%,
+      hsla(201.99999999999997, 100%, 94.11764705882352%, 1) 0%,
+      hsla(201.99999999999997, 100%, 94.11764705882352%, 0) 100%
+    ),
+    radial-gradient(
+      at 80.67571417506147% 77.36934613667599%,
+      hsla(33.33333333333323, 100%, 98.23529411764707%, 1) 0%,
+      hsla(33.33333333333323, 100%, 98.23529411764707%, 0) 100%
+    );
+  --background-image-dark-gradient: radial-gradient(
+    at 50% 50%,
+    hsla(210, 29%, 27%, 0.8) 0%,
+    hsla(210, 29%, 27%, 0) 100%
+  );
+}
+
+/*
+  The default border color has changed to `currentcolor` in Tailwind CSS v4,
+  so we've added these compatibility styles to make sure everything still
+  looks the same as it did with Tailwind CSS v3.
+
+  If we ever want to remove these styles, we need to add an explicit border
+  color utility to any element that depends on these defaults.
+*/
+@layer custom-base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--color-gray-200, currentcolor);
+  }
+}
+
+body {
+  position: relative;
+  z-index: 10;
+  font-weight: 400;
+  font-size: 16px;
+  color: #64748b;
+  background-color: #f1f5f9;
+}
+
+::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+@keyframes compress-progress-shine {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes compress-progress-stripes {
+  0% {
+    background-position: 0 0;
+  }
+  100% {
+    background-position: 1rem 0;
+  }
+}
+
+.animate-compress-progress-shine {
+  animation: compress-progress-shine 1.4s ease-in-out infinite;
+}
+
+.animate-compress-progress-stripes {
+  animation: compress-progress-stripes 0.75s linear infinite;
+}

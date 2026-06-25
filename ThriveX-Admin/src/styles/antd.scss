@@ -1,0 +1,344 @@
+/* ------------------ 自定义Antd组件样式开始 ------------------ */
+
+// 只取消颜色相关的过渡效果, 其他过渡保持正常 (暗色切换时颜色变化不一致会导致效果不好)
+* {
+    transition-property:
+        opacity, transform, translate, scale, box-shadow, filter, width, height, min-width, min-height, max-width,
+        max-height, margin, margin-top, margin-right, margin-bottom, margin-left, padding, padding-top, padding-right,
+        padding-bottom, padding-left, left, right, top, bottom, inset, font-size, font-weight, letter-spacing,
+        line-height, text-indent, text-shadow, border-width, border-radius, outline-width, outline-offset, flex,
+        flex-grow, flex-shrink, flex-basis, gap, row-gap, column-gap, visibility, z-index, clip-path, backdrop-filter,
+        border-style, outline-style !important;
+}
+
+a {
+    color: inherit;
+    
+    &:hover {
+        color: var(--color-primary) !important;
+    }
+}
+
+/* 表单获取焦点时的阴影效果 */
+.ant-input:focus,
+.ant-input-focused,
+.ant-input-number:focus,
+.ant-input-number-focused,
+.ant-select-focused.ant-select-outlined,
+.ant-select-focused .ant-select-selector,
+.ant-picker-focused,
+.ant-textarea:focus,
+.ant-input-affix-wrapper-focused {
+    box-shadow: 0 0 0 4px rgba(5, 72, 255, 0.06) !important;
+}
+
+/* 表单校验失败时的阴影效果 */
+.ant-input-status-error:focus,
+.ant-input-status-error.ant-input-focused,
+.ant-input-number-status-error:focus,
+.ant-input-number-status-error.ant-input-number-focused,
+.ant-select-status-error.ant-select-focused.ant-select-outlined,
+.ant-select-status-error.ant-select-focused .ant-select-selector,
+.ant-picker-status-error.ant-picker-focused,
+.ant-textarea-status-error:focus,
+.ant-input-affix-wrapper-status-error.ant-input-affix-wrapper-focused {
+    box-shadow: 0 0 0 4px rgba(255, 77, 79, 0.1) !important;
+}
+
+// 自定义input后置按钮样式
+.customizeAntdInputAddonAfter {
+    .ant-input-group-addon {
+        padding: 0;
+
+        > span {
+            padding: 8px 10px;
+        }
+    }
+}
+
+// 图片 URL 输入 + 选择按钮组合
+.image-url-compact {
+    display: flex !important;
+    width: 100%;
+
+    > .ant-input-affix-wrapper,
+    > .ant-input {
+        flex: 1;
+        min-width: 0;
+        border-top-right-radius: 0 !important;
+        border-bottom-right-radius: 0 !important;
+    }
+
+    > .ant-btn {
+        flex-shrink: 0;
+        height: var(--antd-control-height) !important;
+        padding-inline: 14px !important;
+        border-top-left-radius: 0 !important;
+        border-bottom-left-radius: 0 !important;
+        border-color: var(--antd-control-border) !important;
+        background-color: var(--antd-control-bg) !important;
+        color: var(--antd-control-text);
+        font-size: 13px;
+        box-shadow: none !important;
+
+        &:hover {
+            border-color: var(--antd-control-border-hover) !important;
+            color: var(--color-primary, #3b82f6) !important;
+            z-index: 1;
+        }
+    }
+
+    &:focus-within > .ant-input-affix-wrapper {
+        z-index: 2;
+    }
+}
+
+.ant-form-inline {
+    margin-inline-end: 10px;
+}
+
+/* 全站表单控件统一样式（输入框 / 下拉 / 日期） */
+:root {
+    --antd-control-height: 36px;
+    --antd-control-radius: 8px;
+    --antd-control-border: #e2e8f0;
+    --antd-control-border-hover: #cbd5e1;
+    --antd-control-bg: #fff;
+    --antd-control-placeholder: #94a3b8;
+    --antd-control-text: #475569;
+    --antd-control-icon: #94a3b8;
+}
+
+.dark {
+    --antd-control-border: var(--color-strokedark, #475f7d);
+    --antd-control-border-hover: #5a7290;
+    --antd-control-bg: var(--color-boxdark-2, #263444);
+    --antd-control-placeholder: #64748b;
+    --antd-control-text: #cbd5e1;
+    --antd-control-icon: #64748b;
+}
+
+.ant-input:not(textarea),
+.ant-input-affix-wrapper,
+.ant-input-number,
+.ant-input-number .ant-input-number-input-wrap,
+.ant-select.ant-select-outlined,
+.ant-select .ant-select-selector,
+.ant-picker {
+    min-height: var(--antd-control-height) !important;
+    border-radius: var(--antd-control-radius) !important;
+    border-color: var(--antd-control-border) !important;
+    background-color: var(--antd-control-bg) !important;
+    color: var(--antd-control-text);
+    font-size: 13px;
+    transition:
+        border-color 0.2s ease,
+        box-shadow 0.2s ease !important;
+}
+
+.ant-input:not(textarea) {
+    height: var(--antd-control-height);
+    padding-inline: 12px;
+}
+
+.ant-input-affix-wrapper {
+    width: 101%;
+    height: var(--antd-control-height);
+    padding-inline: 10px 12px;
+
+    .ant-input {
+        height: auto;
+        min-height: auto !important;
+        padding-inline: 6px 0;
+        font-size: 13px;
+    }
+
+    .ant-input-prefix,
+    .ant-input-suffix {
+        color: var(--antd-control-icon);
+    }
+}
+
+.ant-input:not(textarea)::placeholder,
+.ant-input-affix-wrapper input::placeholder {
+    color: var(--antd-control-placeholder);
+}
+
+.ant-input-number {
+    height: var(--antd-control-height);
+    width: 100%;
+
+    .ant-input-number-input {
+        height: calc(var(--antd-control-height) - 2px);
+        padding-inline: 12px;
+        font-size: 13px;
+    }
+}
+
+.ant-select {
+    height: var(--antd-control-height);
+
+    .ant-select-selector {
+        height: var(--antd-control-height) !important;
+        padding-inline: 12px !important;
+        align-items: center;
+    }
+
+    &:not(.ant-select-multiple) .ant-select-selection-placeholder,
+    &:not(.ant-select-multiple) .ant-select-selection-item {
+        line-height: calc(var(--antd-control-height) - 2px) !important;
+        font-size: 13px;
+    }
+
+    .ant-select-selection-placeholder {
+        color: var(--antd-control-placeholder) !important;
+    }
+
+    .ant-select-arrow {
+        color: var(--antd-control-icon);
+    }
+
+    /* Ant Design 6 多选使用 SelectInput，根节点默认 flex-start + 旧版 line-height 会导致标签贴顶 */
+    &.ant-select-multiple {
+        height: auto !important;
+        min-height: var(--antd-control-height);
+        align-items: center !important;
+
+        &.ant-select-lg {
+            min-height: 40px;
+        }
+
+        .ant-select-content {
+            align-items: center !important;
+        }
+
+        .ant-select-selection-item {
+            line-height: 20px !important;
+            height: auto !important;
+            font-size: 13px;
+        }
+
+        .ant-select-suffix {
+            align-self: center !important;
+        }
+
+        .ant-select-selector {
+            height: auto !important;
+            min-height: var(--antd-control-height) !important;
+            align-items: center !important;
+        }
+    }
+}
+
+.ant-picker {
+    height: var(--antd-control-height);
+    padding-inline: 10px 12px;
+
+    .ant-picker-input > input {
+        font-size: 13px;
+        color: var(--antd-control-text);
+
+        &::placeholder {
+            color: var(--antd-control-placeholder);
+        }
+    }
+
+    .ant-picker-separator {
+        color: var(--antd-control-icon);
+    }
+
+    .ant-picker-suffix,
+    .ant-picker-clear {
+        color: var(--antd-control-icon);
+    }
+}
+
+.ant-input:not(textarea):hover,
+.ant-input-affix-wrapper:hover,
+.ant-input-number:hover,
+.ant-select:not(.ant-select-disabled):hover.ant-select-outlined,
+.ant-select:not(.ant-select-disabled):hover .ant-select-selector,
+.ant-picker:hover {
+    border-color: var(--antd-control-border-hover) !important;
+}
+
+.ant-input:not(textarea):focus,
+.ant-input-focused,
+.ant-input-affix-wrapper-focused,
+.ant-input-number-focused,
+.ant-select-focused.ant-select-outlined,
+.ant-select-focused .ant-select-selector,
+.ant-picker-focused {
+    border-color: var(--color-primary, #60a5fa) !important;
+}
+
+.ant-tabs-nav {
+    padding-top: 0 !important;
+    margin-bottom: 0 !important;
+}
+/* ------------------ 自定义Antd组件样式结束 ------------------ */
+
+// ------------------ Antd组件暗色适配 开始 ------------------
+// 使用 CSS 变量而非 @apply 自定义颜色，避免 antd.scss 单独编译时 Tailwind 无法识别 index.css 中的 @theme
+.ant-card {
+    @apply overflow-hidden;
+}
+
+.ant-card-body,
+.ant-pagination-item,
+.ant-drawer-header,
+.ant-drawer-body,
+.ant-table-cell::before {
+    .dark & {
+        background-color: var(--color-boxdark);
+    }
+}
+
+.ant-pagination-item:hover,
+.ant-table-cell,
+.ant-table-row:hover .ant-table-cell,
+.ant-card {
+    .dark & {
+        background-color: var(--color-boxdark) !important;
+        border-color: var(--color-strokedark) !important;
+    }
+}
+
+.ant-input,
+.ant-input-affix-wrapper,
+.ant-picker-outlined,
+.ant-picker-panel-layout,
+.ant-picker-range-arrow::before,
+.ant-select.ant-select-outlined,
+.ant-select,
+.ant-select-selector,
+.ant-modal-content {
+    .dark & {
+        background-color: var(--color-boxdark-2) !important;
+        border-color: var(--color-strokedark) !important;
+    }
+}
+
+.ant-modal-header {
+    .dark & {
+        background: transparent;
+    }
+}
+
+.ant-transfer-list {
+    .dark & {
+        border-color: var(--color-strokedark);
+    }
+}
+
+/* 暗色下标签统一为柔和样式，提升对比度与一致性 */
+.dark .ant-tag {
+    border: 1px solid var(--tw-stroke-dark, #475f7d) !important;
+    background: rgba(71, 95, 125, 0.25) !important;
+    color: rgba(226, 232, 240, 0.95) !important;
+}
+.dark .ant-tag:hover {
+    background: rgba(71, 95, 125, 0.4) !important;
+    border-color: rgba(71, 95, 125, 0.7) !important;
+}
+// ------------------ Antd组件暗色适配 结束 ------------------

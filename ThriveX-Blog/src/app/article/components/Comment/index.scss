@@ -1,0 +1,6 @@
+.CommentComponent {
+    // 评论标题
+    .title::after {
+        @apply content-['一针见血_🎉'] absolute -top-5 left-1/2 -translate-x-1/2 w-[180px] bg-white dark:bg-black-a text-center text-2xl;
+    }
+}
