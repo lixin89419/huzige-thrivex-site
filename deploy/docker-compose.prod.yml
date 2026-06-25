@@ -33,7 +33,7 @@ services:
       retries: 20
 
   server:
-    image: ghcr.io/lixin89419/huzige-thrivex-server:latest
+    image: ccr.ccs.tencentyun.com/huzige/huzige-thrivex-server:latest
     restart: unless-stopped
     depends_on:
       mysql:
@@ -58,13 +58,13 @@ services:
       - upload_data:/server/static/upload
 
   admin:
-    image: ghcr.io/lixin89419/huzige-thrivex-admin:latest
+    image: ccr.ccs.tencentyun.com/huzige/huzige-thrivex-admin:latest
     restart: unless-stopped
     depends_on:
       - server
 
   blog:
-    image: ghcr.io/lixin89419/huzige-thrivex-blog:latest
+    image: ccr.ccs.tencentyun.com/huzige/huzige-thrivex-blog:latest
     restart: unless-stopped
     depends_on:
       - server
@@ -88,4 +88,3 @@ volumes:
   mysql_data:
   redis_data:
   upload_data:
-
