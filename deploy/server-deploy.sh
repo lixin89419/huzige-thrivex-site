@@ -45,24 +45,6 @@ curl -fsSL "$REPO_RAW/deploy/docker-compose.prod.yml" -o docker-compose.yml
 curl -fsSL "$REPO_RAW/deploy/nginx/default.conf" -o nginx/default.conf
 curl -fsSL "$REPO_RAW/ThriveX-Server/ThriveX.sql" -o ThriveX.sql
 
-JAR_URL=${JAR_URL:-https://raw.githubusercontent.com/lixin89419/huzige-thrivex-site/main/deploy/artifacts/blog.jar}
-JAR_TMP=server/app.jar.part
-rm -f "$JAR_TMP"
-for i in $(seq 1 8); do
-  echo "Downloading server jar, attempt $i"
-  if curl -fsSL --retry 8 --retry-all-errors --retry-delay 5 --connect-timeout 20 --max-time 900 -C - "$JAR_URL" -o "$JAR_TMP"; then
-    break
-  fi
-  sleep 5
-done
-
-JAR_SIZE=$(wc -c < "$JAR_TMP" | tr -d ' ')
-if [ "$JAR_SIZE" -lt 70000000 ]; then
-  echo "Downloaded jar is too small: $JAR_SIZE bytes"
-  exit 1
-fi
-mv "$JAR_TMP" server/app.jar
-
 set -a
 . ./.env
 set +a
