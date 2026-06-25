@@ -1,7 +1,5 @@
 FROM eclipse-temurin:11-jre-jammy
 
-ARG VERSION=2.5.2
-
 ENV PORT=9003
 ENV DB_PORT=3306
 ENV DB_NAME=ThriveX
@@ -16,7 +14,7 @@ ENV TZ=Asia/Shanghai
 
 WORKDIR /server
 
-ADD https://github.com/LiuYuYang01/ThriveX-Server/releases/download/${VERSION}/blog.jar /server/app.jar
+COPY blog.jar /server/app.jar
 COPY RUN.runtime.sh /server/RUN.runtime.sh
 
 RUN chmod +x /server/RUN.runtime.sh

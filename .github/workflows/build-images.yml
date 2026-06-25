@@ -57,6 +57,10 @@ jobs:
           username: ${{ secrets.TCR_USERNAME }}
           password: ${{ secrets.TCR_PASSWORD }}
 
+      - name: Download server jar
+        if: matrix.name == 'server'
+        run: curl -fL --retry 5 --retry-delay 3 https://github.com/LiuYuYang01/ThriveX-Server/releases/download/2.5.2/blog.jar -o ThriveX-Server/blog.jar
+
       - name: Build and push ${{ matrix.name }}
         uses: docker/build-push-action@v6
         with:
