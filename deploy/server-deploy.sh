@@ -45,7 +45,7 @@ curl -fsSL "$REPO_RAW/deploy/docker-compose.prod.yml" -o docker-compose.yml
 curl -fsSL "$REPO_RAW/deploy/nginx/default.conf" -o nginx/default.conf
 curl -fsSL "$REPO_RAW/ThriveX-Server/ThriveX.sql" -o ThriveX.sql
 
-JAR_URL=${JAR_URL:-https://github.com/LiuYuYang01/ThriveX-Server/releases/download/2.5.2/blog.jar}
+JAR_URL=${JAR_URL:-https://raw.githubusercontent.com/lixin89419/huzige-thrivex-site/main/deploy/artifacts/blog.jar}
 JAR_TMP=server/app.jar.part
 rm -f "$JAR_TMP"
 for i in $(seq 1 8); do
