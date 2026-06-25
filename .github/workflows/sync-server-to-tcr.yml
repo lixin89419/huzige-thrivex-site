@@ -1,0 +1,38 @@
+name: Sync Server Image to TCR
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  GHCR_IMAGE: ghcr.io/lixin89419/huzige-thrivex-server:latest
+  TCR_IMAGE: ccr.ccs.tencentyun.com/huzige/huzige-thrivex-server:latest
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to TCR
+        uses: docker/login-action@v3
+        with:
+          registry: ccr.ccs.tencentyun.com
+          username: ${{ secrets.TCR_USERNAME }}
+          password: ${{ secrets.TCR_PASSWORD }}
+
+      - name: Pull GHCR server image
+        run: docker pull "$GHCR_IMAGE"
+
+      - name: Push server image to TCR
+        run: |
+          docker tag "$GHCR_IMAGE" "$TCR_IMAGE"
+          docker push "$TCR_IMAGE"
